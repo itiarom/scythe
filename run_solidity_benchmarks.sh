@@ -198,6 +198,9 @@ run_benchmark() {
 
     local out="$OUTPUT_DIR/$name"
     mkdir -p "$out"
+    # Keep the (comment-stripped) program the methods reduced from, so the output
+    # dir is self-contained for token/performance analysis.
+    cp "$staged" "$out/original.sol"
     local timefile="$out/time"; : > "$timefile"
 
     local greduce_time=0
