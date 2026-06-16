@@ -142,10 +142,9 @@ class SolidityDeclarationRemoval(ASTRemoval):
         if self._is_selected(parsers.declaration_name(node), "struct"):
             self.removed_nodes.append(node)
 
-    def visit_variable_declaration(self, node):
-        """Collects variable declaration nodes selected for removal."""
-        if self._is_selected(parsers.declaration_name(node), "var"):
-            self.removed_nodes.append(node)
+    # Note: local variables (node_type "var") are handled at the statement level
+    # by `visit_use_site_statement` -- deleting the bare `variable_declaration`
+    # would leave a dangling `= expr;`, so there is deliberately no visitor for it.
 
     def visit_state_variable_declaration(self, node):
         """Collects state variable nodes selected for removal."""
@@ -356,7 +355,12 @@ class SolidityDeclarationRemoval(ASTRemoval):
             else:
                 merged.append([start, end])
 
-        source = bytes(tree.root_node.text)
+        # Cut from the exact bytes that were parsed (line above), NOT
+        # tree.root_node.text: when the source has leading/trailing whitespace
+        # (e.g. a leading comment stripped to blank lines), tree-sitter's root
+        # node starts after it, so root_node.text is shorter than the input and
+        # every absolute start_byte/end_byte would be misaligned -> corrupt cuts.
+        source = self.content.encode("utf-8")
         for start, end in sorted(merged, reverse=True):
             source = source[:start] + source[end:]
         return remove_empty_lines(source.decode("utf-8"))
@@ -471,7 +475,10 @@ class SolidityDeclarationRemoval(ASTRemoval):
 
         if not flattened:
             return self.content
-        out = bytes(tree.root_node.text).decode("utf-8")
+        # Use the parsed source itself (not tree.root_node.text, which omits any
+        # leading/trailing whitespace) so the absolute byte offsets in `edits`
+        # stay aligned -- see remove_nodes for the detailed rationale.
+        out = self.content
         for start, end, text in sorted(edits, key=lambda e: e[0], reverse=True):
             out = out[:start] + text + out[end:]
         return remove_empty_lines(out)

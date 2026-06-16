@@ -75,6 +75,7 @@ def main():
         ["contract", "struct"],
         ["state_var"],
         ["contract", "struct"],
+        ["var"]
     ]
     parallel = True
 
@@ -109,14 +110,23 @@ def main():
         graph = build_graph_from_file(file_path, args.language)
         interesting.graph = graph
 
-    for pass_ in passes:
-        if args.language == "java":
-            graph = build_graph_from_file(file_path, args.language)
-            interesting.graph = graph
+    # Solidity iterates the passes to a fixed point (removals enable further
+    # removals: e.g. dropping a local var's last use lets the var go on the next
+    # round); c/java run the loop once. The graph is rebuilt per pass so it
+    # matches the progressively reduced source.
+    fixed_point = False
+    while not fixed_point:
+        before = utils.read_file(file_path)
+        for pass_ in passes:
+            if args.language in ("java", "solidity"):
+                graph = build_graph_from_file(file_path, args.language)
+                interesting.graph = graph
 
-        interesting.mode = pass_
-        perform_dd(interesting, lambda n: n.node_type in pass_,
-                   parallel=parallel, language=args.language)
+            interesting.mode = pass_
+            perform_dd(interesting, lambda n: n.node_type in pass_,
+                       parallel=parallel, language=args.language)
+        fixed_point = (args.language != "solidity"
+                       or utils.read_file(file_path) == before)
 
     if args.language == "java":
         graph = build_graph_from_file(file_path, args.language)

@@ -1,6 +1,7 @@
 import os
 import string
 import random
+import hashlib
 import traceback
 
 import networkx as nx
@@ -29,6 +30,11 @@ class Interesting():
         self.reset_state()
         self.mode = None
         self.removal_mode = mode
+        # Property-check results keyed by candidate *content* hash. Unlike
+        # `self.cache` (reset every pass) this persists across all passes and
+        # fixed-point rounds, so an identical candidate program is never sent to
+        # the (≈1s) test script twice -- the dominant cost in reduction.
+        self.prop_cache = {}
 
     def reset_state(self):
         self.cache = {}
@@ -68,28 +74,29 @@ class Interesting():
             modified_content = ast_removal.flatten_inheritance(nodes_to_remove)
         else:
             modified_content = ast_removal.remove_nodes(nodes_to_remove, mode)
-        name = ''.join(random.sample(string.ascii_letters + string.digits, 5))
-        if (self.language == 'solidity'):
-            temp_file_path = f"{name}.sol"
-        elif (self.language == 'c'):
-            temp_file_path = f"{name}.c"
-        elif (self.language == 'java'):
-            temp_file_path = f"{name}.java"
-        with open(temp_file_path, 'w') as temp_file:
-            temp_file.write(modified_content)
-        output = self.prop_checker.run_test_script(temp_file_path)
-        if output is not None:
-            if output == 0:
-                # property is satisfied because script returned zero code 0
-                os.remove(temp_file_path)
-                self.removed_nodes = nodes_to_remove
-                return modified_content
-            else:
-                os.remove(temp_file_path)
-                return None
+        # Skip the expensive test script if this exact program was checked before.
+        content_key = hashlib.sha256(modified_content.encode("utf-8")).hexdigest()
+        if content_key in self.prop_cache:
+            output = self.prop_cache[content_key]
         else:
+            name = ''.join(random.sample(string.ascii_letters + string.digits, 5))
+            if (self.language == 'solidity'):
+                temp_file_path = f"{name}.sol"
+            elif (self.language == 'c'):
+                temp_file_path = f"{name}.c"
+            elif (self.language == 'java'):
+                temp_file_path = f"{name}.java"
+            with open(temp_file_path, 'w') as temp_file:
+                temp_file.write(modified_content)
+            output = self.prop_checker.run_test_script(temp_file_path)
             os.remove(temp_file_path)
-            return None
+            self.prop_cache[content_key] = output
+
+        if output == 0:
+            # property is satisfied because the script returned exit code 0
+            self.removed_nodes = nodes_to_remove
+            return modified_content
+        return None
 
     def get_contract_by_name(self, contract_name):
         nodes = [n for n in self.graph.nodes()
@@ -152,11 +159,15 @@ def perform_dd(
         return
     cache = picire.parallel_dd.SharedCache(
         picire.cache.ConfigCache(cache_fail=True))
+    # Solidity re-runs the passes to a fixed point (main.py), so picire's own
+    # dd* intra-pass fixpoint is redundant there -- a single ddmin sweep per pass
+    # is already 1-minimal and roughly halves the test-script calls.
+    dd_star = language != "solidity"
     dd_obj = dd_cls(
         interesting,
         cache=cache,
         split=picire.splitter.BalancedSplit(n=2),
-        dd_star=True,
+        dd_star=dd_star,
         config_iterator=picire.iterator.CombinedIterator(
             False, picire.iterator.skip,
             picire.iterator.random if language != 'c' else picire.iterator.backward
