@@ -53,6 +53,10 @@ ONLY_GREDUCE=false
 BENCH_JDK_BIN=""
 # Resolved once (Java): a modern (>=11) `java` to run Perses itself.
 PERSES_JAVA=""
+# Resolved once (Java): a non-buggy reference `javac` (>=11). The set-2 crash
+# oracles use it to reject programs that no longer compile cleanly, so a reduced
+# program stays a valid Java program that ONLY crashes the buggy javac.
+REFERENCE_JAVAC=""
 
 usage() { sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^#\s\?//'; exit "${1:-0}"; }
 
@@ -149,40 +153,52 @@ ensure_solc() {
 # Java compiler (JDK) provisioning via SDKMAN
 # =============================================================================
 
-# Echo the bin dir of an installed SDKMAN JDK whose major version matches $1
-# (e.g. 11 -> .../11.0.12-open/bin), or return non-zero if none is installed.
-jdk_bin_for_major() {
-    local major="$1" cand
-    for cand in "$HOME"/.sdkman/candidates/java/"$major".*/ \
-                "$HOME"/.sdkman/candidates/java/"$major"-*/; do
+# Echo the bin dir of an installed SDKMAN JDK matching $1. A spec containing a
+# vendor suffix (e.g. 8.0.282-trava) is an EXACT identifier -- required for the
+# javac8 crash benchmarks, whose bug only exists in specific builds; a bare major
+# (e.g. 11) matches any installed build of that major. Non-zero if none found.
+jdk_bin_for() {
+    local spec="$1" cand
+    if [[ "$spec" == *-* ]]; then                       # exact identifier
+        cand="$HOME/.sdkman/candidates/java/$spec"
+        [[ -x "$cand/bin/javac" ]] && { echo "$cand/bin"; return 0; }
+        return 1
+    fi
+    for cand in "$HOME"/.sdkman/candidates/java/"$spec".*/ \
+                "$HOME"/.sdkman/candidates/java/"$spec"-*/; do
         cand="${cand%/}"
         [[ -d "$cand" && -x "$cand/bin/javac" ]] && { echo "$cand/bin"; return 0; }
     done
     return 1
 }
 
-# Ensure a JDK for major version $1 exists, installing it via SDKMAN if needed.
-# On success sets the global BENCH_JDK_BIN to its bin dir; returns non-zero if
-# the JDK is still unavailable afterwards.
+# Ensure a JDK matching $1 exists, installing it via SDKMAN if needed. An exact
+# identifier is installed verbatim; a bare major installs the first build SDKMAN
+# lists for it. On success sets the global BENCH_JDK_BIN; non-zero if still
+# unavailable (e.g. a pinned build that is "local only" / no longer downloadable).
 ensure_jdk() {
-    local major="$1" bin id
-    if bin="$(jdk_bin_for_major "$major")"; then BENCH_JDK_BIN="$bin"; return 0; fi
+    local spec="$1" bin id
+    if bin="$(jdk_bin_for "$spec")"; then BENCH_JDK_BIN="$bin"; return 0; fi
 
     local init="$HOME/.sdkman/bin/sdkman-init.sh"
     if [[ -s "$init" ]]; then
-        echo "  Installing a JDK $major via SDKMAN ..."
+        echo "  Installing JDK $spec via SDKMAN ..."
         set +u
         export sdkman_auto_answer=true sdkman_selfupdate_enable=false
         # shellcheck disable=SC1090
         source "$init"
-        # First identifier whose version column starts with "<major>."
-        id="$(sdk list java 2>/dev/null | awk -F'|' -v m="$major" '
-            NF>=6 { v=$3; gsub(/[ \t]/,"",v); idn=$6; gsub(/[ \t]/,"",idn);
-                    if (v ~ "^"m"\\.") { print idn; exit } }')"
+        if [[ "$spec" == *-* ]]; then
+            id="$spec"                                   # exact identifier
+        else
+            # first identifier whose version column starts with "<major>."
+            id="$(sdk list java 2>/dev/null | awk -F'|' -v m="$spec" '
+                NF>=6 { v=$3; gsub(/[ \t]/,"",v); idn=$6; gsub(/[ \t]/,"",idn);
+                        if (v ~ "^"m"\\.") { print idn; exit } }')"
+        fi
         [[ -n "$id" ]] && sdk install java "$id" >/dev/null 2>&1
         set -u
     fi
-    if bin="$(jdk_bin_for_major "$major")"; then BENCH_JDK_BIN="$bin"; return 0; fi
+    if bin="$(jdk_bin_for "$spec")"; then BENCH_JDK_BIN="$bin"; return 0; fi
     return 1
 }
 
@@ -204,6 +220,27 @@ resolve_perses_java() {
     return 1
 }
 
+# Resolve a non-buggy reference `javac` (>=11) for the set-2 crash oracles. They
+# use it to reject programs that no longer compile cleanly, so a reduced program
+# stays a valid Java program that ONLY crashes the buggy javac. Prefer javac 11
+# (the canonical reference, installing it if needed) without disturbing the
+# per-benchmark JDK selection; fall back to the modern JDK that runs Perses.
+resolve_reference_javac() {
+    local bin saved
+    if bin="$(jdk_bin_for 11)"; then REFERENCE_JAVAC="$bin/javac"; return 0; fi
+    saved="$BENCH_JDK_BIN"
+    if ensure_jdk 11; then
+        bin="$BENCH_JDK_BIN"; BENCH_JDK_BIN="$saved"
+        REFERENCE_JAVAC="$bin/javac"; return 0
+    fi
+    BENCH_JDK_BIN="$saved"
+    if [[ -n "$PERSES_JAVA" ]]; then
+        bin="$(dirname "$PERSES_JAVA")/javac"
+        [[ -x "$bin" ]] && { REFERENCE_JAVAC="$bin"; return 0; }
+    fi
+    return 1
+}
+
 # =============================================================================
 # Reduction drivers
 # =============================================================================
@@ -217,7 +254,7 @@ run_greduce() {
         # package class files) does not litter the repo, with the benchmark JDK
         # first on PATH so the oracle resolves the right javac.
         work="$(mktemp -d)"
-        ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" \
+        ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" \
             "$GREDUCE" --source-file "$src" --script "$test" \
                        --language java --mode "$GREDUCE_MODE" ) >/dev/null 2>&1
         rm -rf "$work"
@@ -246,7 +283,7 @@ run_perses() {
     if [[ "$LANGUAGE" == "java" ]]; then
         # Perses runs on the modern JVM; the oracle it spawns inherits PATH, so
         # the benchmark JDK first on PATH gives the test script the right javac.
-        PATH="$BENCH_JDK_BIN:$PATH" "$PERSES_JAVA" -jar "$PERSES_JAR" \
+        PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" "$PERSES_JAVA" -jar "$PERSES_JAR" \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
             --output-dir "$persesout" >/dev/null 2>&1
@@ -289,7 +326,7 @@ oracle_holds() {
     local test="$1" candidate="$2" rc work
     if [[ "$LANGUAGE" == "java" ]]; then
         work="$(mktemp -d)"
-        ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" bash "$test" "$candidate" ) >/dev/null 2>&1
+        ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" bash "$test" "$candidate" ) >/dev/null 2>&1
         rc=$?
         rm -rf "$work"
     else
@@ -387,6 +424,10 @@ if [[ "$LANGUAGE" == "java" ]]; then
     if ! resolve_perses_java; then
         echo "Error: no JDK >= 11 found to run Perses (install one via SDKMAN)." >&2
         exit 1
+    fi
+    if ! resolve_reference_javac; then
+        echo "  WARN: no reference javac (>=11) resolved; the set-2 crash oracles" >&2
+        echo "        will skip their compile-validity gate." >&2
     fi
 fi
 
