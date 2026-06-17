@@ -311,3 +311,140 @@ def test_flatten_leaf_contract_is_noop(flatten_graph_and_src):
     graph, src = flatten_graph_and_src
     out = _flatten(graph, src, "Derived")
     assert out == src
+
+
+# --- type-use placeholder retyping (fallback after deletion) -------------------
+
+# `Point` is used as a *parameter* type (deletion cannot touch it -- removing the
+# param would change `dist`'s signature) AND as a state var (deletable). `Pair`
+# is used only in a local, so it is fully deletable. Removing `Point` must keep
+# `dist` by retyping its param to a placeholder `struct __S` seeded with Point's
+# members (so `p.x + p.y` still type-checks); removing `Pair` needs no placeholder.
+PLACEHOLDER_SNIPPET = """pragma solidity 0.5.0;
+
+contract C {
+    struct Point { uint256 x; uint256 y; }
+    struct Pair { uint256 a; uint256 b; }
+
+    Point internal origin;
+
+    function dist(Point memory p) internal pure returns (uint256) {
+        return p.x + p.y;
+    }
+    function viaField() public view returns (uint256) { return origin.x; }
+    function usesPair() public pure returns (uint256) {
+        Pair memory q = Pair(1, 2);
+        return q.a;
+    }
+    function keep() public pure returns (uint256) { return 42; }
+}
+"""
+
+
+@pytest.fixture
+def placeholder_graph_and_src(tmp_path):
+    f = tmp_path / "placeholder.sol"
+    f.write_text(PLACEHOLDER_SNIPPET)
+    return build_graph_from_file(str(f), "solidity"), PLACEHOLDER_SNIPPET
+
+
+@pytest.mark.skipif(not SOLC_OK, reason=f"solc {SOLC_VERSION} not installed")
+def test_placeholder_snippet_baseline_compiles(tmp_path):
+    ok, stderr = _compiles(PLACEHOLDER_SNIPPET, tmp_path)
+    assert ok, f"baseline snippet should compile:\n{stderr}"
+
+
+def test_struct_param_retyped_to_placeholder(placeholder_graph_and_src, tmp_path):
+    """A struct still used as a parameter type is retyped to `struct __S`
+    (seeded with its members) instead of blocking the struct's removal."""
+    graph, src = placeholder_graph_and_src
+    out = _remove(graph, src, "struct", "Point")
+    assert "struct Point" not in out          # the struct declaration is gone
+    assert "origin" not in out                # the deletable state var cascaded away
+    assert "struct __S" in out                # placeholder injected
+    assert "__S memory p" in out              # the parameter was retyped
+    assert "uint256 x" in out and "uint256 y" in out  # members copied over
+    assert "p.x + p.y" in out                 # member access still type-checks
+    assert "function dist" in out             # the function survives
+    assert "function keep" in out             # unrelated code survives
+    assert _parses_clean(out)
+    if SOLC_OK:
+        ok, stderr = _compiles(out, tmp_path)
+        assert ok, f"placeholder retyping left an error:\n{stderr}"
+
+
+def test_placeholder_injected_inside_contract(placeholder_graph_and_src):
+    """The placeholder lives inside the contract (file-level structs are invalid
+    in <0.6 Solidity), so `struct __S` appears between `contract C {` and `}`."""
+    graph, src = placeholder_graph_and_src
+    out = _remove(graph, src, "struct", "Point")
+    assert out.index("contract C") < out.index("struct __S")
+
+
+def test_fully_deletable_struct_needs_no_placeholder(placeholder_graph_and_src, tmp_path):
+    """A struct used only in deletable positions is removed outright -- no
+    placeholder is introduced (retyping is strictly a fallback)."""
+    graph, src = placeholder_graph_and_src
+    out = _remove(graph, src, "struct", "Pair")
+    assert "struct Pair" not in out
+    assert "__S" not in out                   # no placeholder needed
+    assert _parses_clean(out)
+    if SOLC_OK:
+        ok, stderr = _compiles(out, tmp_path)
+        assert ok, f"removing fully-deletable struct left an error:\n{stderr}"
+
+
+# --- deletion completeness: control-flow headers + transitively-dead locals ----
+
+# `xs` is read in a `for` whose bound is a *derived local* (`n = xs.length`) and
+# in an `if` condition. Removing `xs` must also drop the dead local `n`, the loop,
+# and the `if` -- otherwise the loop's `i < n` / the `if (xs...)` dangle and the
+# program no longer compiles. Statements not touching `xs` must survive.
+CONTROLFLOW_SNIPPET = """pragma solidity 0.5.0;
+
+contract C {
+    uint256[] public xs;
+
+    function total() public view returns (uint256) {
+        uint256 n = xs.length;
+        uint256 s = 0;
+        for (uint256 i = 0; i < n; i++) {
+            s += xs[i];
+        }
+        if (xs.length > 0) {
+            s += 1;
+        }
+        return s;
+    }
+    function keep() public pure returns (uint256) { return 7; }
+}
+"""
+
+
+@pytest.fixture
+def controlflow_graph_and_src(tmp_path):
+    f = tmp_path / "controlflow.sol"
+    f.write_text(CONTROLFLOW_SNIPPET)
+    return build_graph_from_file(str(f), "solidity"), CONTROLFLOW_SNIPPET
+
+
+@pytest.mark.skipif(not SOLC_OK, reason=f"solc {SOLC_VERSION} not installed")
+def test_controlflow_snippet_baseline_compiles(tmp_path):
+    ok, stderr = _compiles(CONTROLFLOW_SNIPPET, tmp_path)
+    assert ok, f"baseline snippet should compile:\n{stderr}"
+
+
+def test_state_var_removal_cleans_loops_and_dead_locals(controlflow_graph_and_src, tmp_path):
+    graph, src = controlflow_graph_and_src
+    out = _remove(graph, src, "state_var", "xs")
+    assert "xs" not in out                # declaration + every use gone
+    assert "for (" not in out             # the loop (bound by a dead local) is gone
+    assert "n = " not in out              # the transitively-dead local is gone
+    assert "if (" not in out              # the `if (xs...)` header is gone
+    assert "uint256 s = 0" in out         # untouched statements survive
+    assert "return s" in out
+    assert "function keep" in out
+    assert _parses_clean(out)
+    if SOLC_OK:
+        ok, stderr = _compiles(out, tmp_path)
+        assert ok, f"removing xs left a dangling control-flow reference:\n{stderr}"

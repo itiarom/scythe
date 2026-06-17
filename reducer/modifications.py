@@ -1,3 +1,4 @@
+import re
 import traceback
 from abc import abstractmethod
 from typing import Any
@@ -27,6 +28,10 @@ class ASTRemoval(parsers.TreeTraversal):
 
 class SolidityDeclarationRemoval(ASTRemoval):
     LANGUAGE = "solidity"
+    # Single shared placeholder type that replaces a removed struct wherever it
+    # is still referenced in a position deletion cannot touch (a parameter /
+    # return type). See `_placeholder_retype_edits`.
+    PLACEHOLDER_STRUCT = "__S"
 
     def __init__(self, content, graph):
         super().__init__(content, graph)
@@ -60,6 +65,14 @@ class SolidityDeclarationRemoval(ASTRemoval):
             "expression_statement": self.visit_use_site_statement,
             "return_statement": self.visit_use_site_statement,
             "variable_declaration_statement": self.visit_use_site_statement,
+            # A control-flow statement whose *header* (condition / loop
+            # init+update) references a removed value can't survive -- its body
+            # statements are cleaned individually by the recursion, but a
+            # dangling condition would not compile, so drop the whole statement.
+            "if_statement": self.visit_use_site_control_flow,
+            "for_statement": self.visit_use_site_control_flow,
+            "while_statement": self.visit_use_site_control_flow,
+            "do_while_statement": self.visit_use_site_control_flow,
         }
         return visitors.get(node.type, self.visit_default)
 
@@ -273,6 +286,42 @@ class SolidityDeclarationRemoval(ASTRemoval):
         if self.removed_value_refs and self._references_removed_value(node):
             self._mark(node)
 
+    def visit_use_site_control_flow(self, node):
+        """Removes an ``if``/``for``/``while`` whose header references a removed
+        value. Only the header (condition, loop init/update -- every child except
+        the ``body``) is checked: body statements are cleaned individually by the
+        recursion, but a removed value in the condition leaves no valid statement,
+        so the whole construct is dropped (e.g. ``for (..; i < removed.length; ..)``)."""
+        if not self.removed_value_refs:
+            return
+        body = node.child_by_field_name("body")
+        body_id = body.id if body is not None else None
+        if any(child.id != body_id and self._references_removed_value(child)
+               for child in node.children):
+            self._mark(node)
+
+    def _expand_dead_locals(self, tree):
+        """Fixpoint over local declarations: a local whose initializer references
+        an already-removed value is itself dead, so its name joins
+        ``removed_value_refs`` and its later uses (including loop headers) are
+        stripped too. Without this, removing e.g. a state var ``xs`` leaves a
+        dangling ``for (..; i < n; ..)`` where ``uint n = xs.length;`` was cut."""
+        changed = True
+        while changed:
+            changed = False
+            stack = [tree.root_node]
+            while stack:
+                n = stack.pop()
+                if n.type == "variable_declaration_statement":
+                    decl = next((c for c in n.children
+                                 if c.type == "variable_declaration"), None)
+                    name = parsers.declaration_name(decl) if decl else None
+                    if (name and name not in self.removed_value_refs
+                            and self._references_removed_value(n)):
+                        self.removed_value_refs.add(name)
+                        changed = True
+                stack.extend(n.children)
+
     def remove_nodes(self, nodes_to_remove: set, mode: str) -> str:
         """
         Removes nodes from Solidity source code.
@@ -337,6 +386,10 @@ class SolidityDeclarationRemoval(ASTRemoval):
                     work.append(dependent)
         self.nodes_to_remove = expanded
 
+        # Transitively mark locals that become dead once the above values are
+        # removed, so their uses (e.g. in loop conditions) are stripped too.
+        self._expand_dead_locals(tree)
+
         self.traverse_node(tree.root_node)
 
         # Collect byte ranges to delete: whole removed nodes + explicit ranges
@@ -344,9 +397,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
         # removed contract and its inner members produce a single clean edit.
         ranges = [(n.start_byte, n.end_byte) for n in self.removed_nodes]
         ranges.extend(self.removed_ranges)
-        if not ranges:
-            return self.content
-
         ranges.sort()
         merged = []
         for start, end in ranges:
@@ -355,15 +405,162 @@ class SolidityDeclarationRemoval(ASTRemoval):
             else:
                 merged.append([start, end])
 
-        # Cut from the exact bytes that were parsed (line above), NOT
+        # Build the edit list: deletions (replace with nothing) plus the
+        # type-use placeholder retyping. A removed struct still referenced in a
+        # position deletion cannot touch (a parameter / return type) has that
+        # reference rewritten to a single placeholder `struct __S` seeded with
+        # the struct's members, so the program stays valid -- the fallback after
+        # deletion. References inside a deleted range are skipped.
+        edits = [(s, e, b"") for s, e in merged]
+        edits += self._placeholder_retype_edits(tree, merged)
+        if not edits:
+            return self.content
+
+        # Apply edits right-to-left over the exact bytes parsed above, NOT
         # tree.root_node.text: when the source has leading/trailing whitespace
         # (e.g. a leading comment stripped to blank lines), tree-sitter's root
         # node starts after it, so root_node.text is shorter than the input and
         # every absolute start_byte/end_byte would be misaligned -> corrupt cuts.
         source = self.content.encode("utf-8")
-        for start, end in sorted(merged, reverse=True):
-            source = source[:start] + source[end:]
+        for start, end, repl in sorted(edits, key=lambda e: e[0], reverse=True):
+            source = source[:start] + repl + source[end:]
         return remove_empty_lines(source.decode("utf-8"))
+
+    # --- type-use placeholder retyping (fallback after deletion) -------------
+
+    def _enclosing_contract_node(self, node):
+        cur = node.parent
+        while cur is not None:
+            if cur.type in ("contract_declaration", "interface_declaration"):
+                return cur
+            cur = cur.parent
+        return None
+
+    @staticmethod
+    def _struct_members(struct_node):
+        """``(field name, field text)`` for each member of a struct node."""
+        body = next((c for c in struct_node.children
+                     if c.type == "struct_body"), None)
+        if body is None:
+            return []
+        return [(parsers.declaration_name(m), m.text.decode("utf-8"))
+                for m in body.children if m.type == "struct_member"]
+
+    def _retype_text(self, text, names):
+        """Rewrite whole-word occurrences of removed struct ``names`` (e.g. in a
+        copied member's type) to the placeholder, so nested uses stay valid."""
+        for name in names:
+            text = re.sub(rf"\b{re.escape(name)}\b",
+                          self.PLACEHOLDER_STRUCT, text)
+        return text
+
+    def _placeholder_struct_decl(self, members, names):
+        """A one-line ``struct __S { ... }`` from member declarations, deduped by
+        field name (copy-all; the field text already carries its ``;``)."""
+        seen, fields = set(), []
+        for fname, text in members:
+            if fname in seen:
+                continue
+            seen.add(fname)
+            fields.append(self._retype_text(text, names))
+        return f"struct {self.PLACEHOLDER_STRUCT} {{ {' '.join(fields)} }}"
+
+    def _placeholder_insert_pos(self, tree, contract_node):
+        """Where to inject a placeholder struct: just inside the enclosing
+        contract body (a struct must live in a contract in <0.6 Solidity), or
+        after the pragma for a file-level reference."""
+        if contract_node is not None:
+            body = next((c for c in contract_node.children
+                         if c.type == "contract_body"), None)
+            if body is not None:
+                brace = next((c for c in body.children if c.type == "{"), None)
+                if brace is not None:
+                    return brace.end_byte
+            return contract_node.end_byte
+        pragma = next((c for c in tree.root_node.children
+                       if c.type == "pragma_directive"), None)
+        return pragma.end_byte if pragma is not None else 0
+
+    def _placeholder_retype_edits(self, tree, deleted_ranges):
+        """Edits that retype surviving references to removed structs to a
+        per-contract placeholder ``struct __S``.
+
+        For each removed struct still referenced as a *type* outside any deleted
+        range (e.g. a function parameter), the reference is rewritten to ``__S``
+        and a ``struct __S`` carrying that struct's members is injected into (or
+        merged with an existing one in) the enclosing contract, so the reduced
+        program still type-checks. References that deletion already removes, and
+        references inside a placeholder we are about to rebuild, are left alone.
+        """
+        removed = {n.name for n in self.nodes_to_remove
+                   if n.node_type == "struct"
+                   and n.name != self.PLACEHOLDER_STRUCT}
+        if not removed:
+            return []
+
+        # Members of each removed struct (only structs we can copy are retyped)
+        # and any pre-existing placeholder to merge into, keyed by contract id.
+        members_by_struct = {}
+        existing = {}                 # enclosing contract id (or None) -> __S node
+        stack = [tree.root_node]
+        while stack:
+            n = stack.pop()
+            if n.type == "struct_declaration":
+                sname = parsers.declaration_name(n)
+                if sname in removed:
+                    members_by_struct[sname] = self._struct_members(n)
+                elif sname == self.PLACEHOLDER_STRUCT:
+                    cnode = self._enclosing_contract_node(n)
+                    existing[id(cnode) if cnode else None] = n
+            stack.extend(n.children)
+        retypable = {s for s in removed if members_by_struct.get(s)}
+        if not retypable:
+            return []
+
+        existing_ranges = [(e.start_byte, e.end_byte) for e in existing.values()]
+
+        def covered(start, end, ranges):
+            return any(rs <= start and end <= re_ for rs, re_ in ranges)
+
+        edits = []
+        seeds = {}                    # contract id -> (contract node, {struct names})
+        stack = [tree.root_node]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type != "user_defined_type":
+                continue
+            name = n.text.decode("utf-8")
+            if name not in retypable:
+                continue
+            if covered(n.start_byte, n.end_byte, deleted_ranges):
+                continue              # deletion already removes this reference
+            if covered(n.start_byte, n.end_byte, existing_ranges):
+                continue              # inside a placeholder we will rebuild below
+            edits.append((n.start_byte, n.end_byte,
+                          self.PLACEHOLDER_STRUCT.encode("utf-8")))
+            cnode = self._enclosing_contract_node(n)
+            key = id(cnode) if cnode is not None else None
+            seeds.setdefault(key, (cnode, set()))[1].add(name)
+
+        if not edits:
+            return []
+
+        # Inject (or rebuild) one placeholder per contract that gained a use.
+        for key, (cnode, names) in seeds.items():
+            members = []
+            if key in existing:
+                members.extend(self._struct_members(existing[key]))
+            for s in names:
+                members.extend(members_by_struct[s])
+            decl = self._placeholder_struct_decl(members, retypable)
+            if key in existing:
+                e = existing[key]
+                edits.append((e.start_byte, e.end_byte, decl.encode("utf-8")))
+            else:
+                pos = self._placeholder_insert_pos(tree, cnode)
+                edits.append((pos, pos, f"\n    {decl}\n".encode("utf-8")))
+        return edits
 
     # --- inheritance-chain simplification (flattening) -----------------------
 
