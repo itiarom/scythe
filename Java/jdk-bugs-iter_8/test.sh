@@ -1,14 +1,11 @@
 #!/bin/bash
-# Property oracle. $1 = candidate path (scythe); otherwise the staged
-# *.java in the cwd (Perses). Requires javac 11 on PATH (the benchmark
-# harness selects it from the sibling `version` file).
-start_time=$(date +%s)
-
+# Property oracle. $1 = candidate path (scythe); otherwise the staged *.java in
+# the cwd (Perses). Requires javac 11 on PATH (from the sibling `version` file).
+# Pins the bug by its javac error CATEGORY (+ the intrinsic CAP# capture marker
+# where the bug involves a capture) -- never by custom class/type names, so
+# scythe's renaming/erasure cannot spuriously change the verdict. The invariant
+# `category == total_errors` means EVERY emitted error is of the target kind.
 source_file="${1:-$(find . -maxdepth 1 -name "*.java" | head -n 1)}"
-expected_error="error: type argument Function1<? extends Byte,? extends Byte> is not within bounds of type-variable A"
-# javac 11.0.12 reports this diagnostic twice (and it is the only error), so the
-# count is 2 on this build -- still "exactly the bug error and nothing else".
-expected_count=2
 
 if [ ! -f "$source_file" ]; then
     echo "Error: Could not find Java file in working directory."
@@ -16,10 +13,10 @@ if [ ! -f "$source_file" ]; then
 fi
 
 javac "$source_file" 2> compile_err.txt
-count=$(grep -o "$expected_error" compile_err.txt | wc -l | xargs)
 total_errors=$(grep -c "error:" compile_err.txt)
+category=$(grep -c "is not within bounds of type-variable" compile_err.txt)
 
-if [ "$count" -eq "$expected_count" ] && [ "$total_errors" -eq "$expected_count" ]; then
+if [ "$total_errors" -ge 1 ] && [ "$category" -eq "$total_errors" ]; then
     exit 0
 else
     exit 1
