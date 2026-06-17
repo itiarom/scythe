@@ -28,9 +28,6 @@ class ASTRemoval(parsers.TreeTraversal):
 
 class SolidityDeclarationRemoval(ASTRemoval):
     LANGUAGE = "solidity"
-    # Single shared placeholder type that replaces a removed struct wherever it
-    # is still referenced in a position deletion cannot touch (a parameter /
-    # return type). See `_placeholder_retype_edits`.
     PLACEHOLDER_STRUCT = "__S"
 
     def __init__(self, content, graph):
@@ -59,16 +56,9 @@ class SolidityDeclarationRemoval(ASTRemoval):
             "emit_statement": self.visit_emit_statement,
             "inheritance_specifier": self.visit_inheritance_specifier,
             "using_directive": self.visit_using_directive,
-            # Use-site cleanup: drop statements that reference a removed
-            # declaration (state var / local var / struct), keeping the program
-            # free of dangling references.
             "expression_statement": self.visit_use_site_statement,
             "return_statement": self.visit_use_site_statement,
             "variable_declaration_statement": self.visit_use_site_statement,
-            # A control-flow statement whose *header* (condition / loop
-            # init+update) references a removed value can't survive -- its body
-            # statements are cleaned individually by the recursion, but a
-            # dangling condition would not compile, so drop the whole statement.
             "if_statement": self.visit_use_site_control_flow,
             "for_statement": self.visit_use_site_control_flow,
             "while_statement": self.visit_use_site_control_flow,
@@ -87,15 +77,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
         return self.contract_scope[-1] if self.contract_scope else None
 
     def _is_selected(self, name, node_type, signature=None):
-        """True if the delta-debugger selected *this* declaration for removal.
-
-        Declarations are matched by a position-independent identity --
-        ``(enclosing contract, name, node type[, parameter signature])`` -- so
-        same-named declarations in different contracts (and overloads) are
-        addressed independently. Matching by bare name instead would couple
-        them and prevent 1-minimal reductions; matching by byte offset would
-        break as the reducer mutates the source.
-        """
         contract = self._current_contract()
         for n in self.nodes_to_remove:
             if n.node_type != node_type or n.name != name:
@@ -108,13 +89,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
         return False
 
     def _name_fully_removed(self, name):
-        """True if every function declaration with this name is being removed.
-
-        A call is only dangling when no same-named function survives, so we
-        strip calls only then -- removing one of several same-named functions
-        never deletes calls bound to the survivors. A function is removed when it
-        is selected directly or its enclosing contract is being removed.
-        """
         decls = [n for n in self.graph.nodes
                  if n.node_type == "function" and n.name == name]
         return bool(decls) and all(
@@ -128,7 +102,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
             self.removed_nodes.append(node)
 
     def visit_contract_declaration(self, node):
-        """Tracks the enclosing contract; removes the whole block if selected."""
         name = parsers.declaration_name(node)
         self.contract_scope.append(name)
         if name in self.removed_contracts:
@@ -139,38 +112,29 @@ class SolidityDeclarationRemoval(ASTRemoval):
             self.contract_scope.pop()
 
     def visit_function_definition(self, node):
-        """Collects the specific function selected for removal."""
         name = parsers.declaration_name(node)
         signature = parsers.parameter_signature(node)
         if self._is_selected(name, "function", signature):
             self.removed_nodes.append(node)
 
     def visit_modifier_definition(self, node):
-        """Collects modifier nodes selected for removal."""
         if self._is_selected(parsers.declaration_name(node), "modifier"):
             self.removed_nodes.append(node)
 
     def visit_struct_definition(self, node):
-        """Collects struct nodes selected for removal."""
         if self._is_selected(parsers.declaration_name(node), "struct"):
             self.removed_nodes.append(node)
 
-    # Note: local variables (node_type "var") are handled at the statement level
-    # by `visit_use_site_statement` -- deleting the bare `variable_declaration`
-    # would leave a dangling `= expr;`, so there is deliberately no visitor for it.
 
     def visit_state_variable_declaration(self, node):
-        """Collects state variable nodes selected for removal."""
         if self._is_selected(parsers.declaration_name(node), "state_var"):
             self.removed_nodes.append(node)
 
     def visit_event_definition(self, node):
-        """Collects event nodes selected for removal."""
         if self._is_selected(parsers.declaration_name(node), "event"):
             self.removed_nodes.append(node)
 
     def _callee_name(self, node):
-        """Name being called/emitted by a call_expression, or None for casts etc."""
         callee = node.children[0] if node.children else None
         if callee is None:
             return None
@@ -184,8 +148,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
         return None
 
     def _enclosing_statement(self, node):
-        """Nearest enclosing statement node, so a removed call/emit takes its
-        whole statement with it (avoids leaving a dangling reference)."""
         current = node
         while current is not None:
             if current.type.endswith("_statement"):
@@ -194,11 +156,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
         return None
 
     def visit_call_expression(self, node):
-        """Removes calls to removed functions and old-style event emits.
-
-        Calls are only stripped when the callee no longer exists (a removed
-        event, or a function with no surviving same-named declaration), so the
-        result keeps no dangling references."""
         call_name = self._callee_name(node)
         if call_name is None:
             return
@@ -206,8 +163,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
             self._mark(self._enclosing_statement(node) or node)
 
     def visit_emit_statement(self, node):
-        """Removes an ``emit Event(...)`` statement when the event is removed
-        (the 0.5+ syntax; pre-0.5 emits are plain calls handled above)."""
         for child in node.children:
             if child.type == "expression":
                 inner = child.children[0] if child.children else None
@@ -222,8 +177,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
                 return
 
     def visit_modifier_invocation(self, node):
-        """Removes a modifier usage (e.g. ``onlyOwner``) on a function when the
-        modifier itself is being removed."""
         for child in node.children:
             if child.type == "identifier":
                 if child.text.decode("utf-8") in self.removed_modifiers:
@@ -231,7 +184,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
                 return
 
     def visit_using_directive(self, node):
-        """Removes ``using Lib for ...`` when ``Lib`` is a removed contract/library."""
         for child in node.children:
             if child.type in ("type_alias", "user_defined_type", "identifier"):
                 if child.text.decode("utf-8") in self.removed_contracts:
@@ -243,8 +195,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
         return node.text.decode("utf-8").split("(")[0].strip()
 
     def visit_inheritance_specifier(self, node):
-        """Removes a base from ``contract X is A, B`` when the base is removed,
-        cleaning up the ``is`` keyword / commas so the result stays valid."""
         if self._inheritance_base(node) not in self.removed_contracts:
             return
         parent = node.parent
@@ -253,13 +203,11 @@ class SolidityDeclarationRemoval(ASTRemoval):
         surviving = [s for s in specs
                      if self._inheritance_base(s) not in self.removed_contracts]
         if not surviving:
-            # remove the whole inheritance clause: `is A, B`
             is_kw = next((c for c in siblings if c.type == "is"), None)
             start = is_kw.start_byte if is_kw else specs[0].start_byte
             end = max(s.end_byte for s in specs)
             self.removed_ranges.append((start, end))
         else:
-            # remove this base plus one adjacent comma
             idx = siblings.index(node)
             start, end = node.start_byte, node.end_byte
             if idx > 0 and siblings[idx - 1].type == ",":
@@ -269,8 +217,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
             self.removed_ranges.append((start, end))
 
     def _references_removed_value(self, node):
-        """True if any identifier/type under ``node`` names a removed state var,
-        local var, or struct."""
         stack = list(node.children)
         while stack:
             n = stack.pop()
@@ -281,17 +227,10 @@ class SolidityDeclarationRemoval(ASTRemoval):
         return False
 
     def visit_use_site_statement(self, node):
-        """Removes a statement that uses (or, for a local variable, declares) a
-        removed state var / local var / struct, so no dangling reference remains."""
         if self.removed_value_refs and self._references_removed_value(node):
             self._mark(node)
 
     def visit_use_site_control_flow(self, node):
-        """Removes an ``if``/``for``/``while`` whose header references a removed
-        value. Only the header (condition, loop init/update -- every child except
-        the ``body``) is checked: body statements are cleaned individually by the
-        recursion, but a removed value in the condition leaves no valid statement,
-        so the whole construct is dropped (e.g. ``for (..; i < removed.length; ..)``)."""
         if not self.removed_value_refs:
             return
         body = node.child_by_field_name("body")
@@ -301,11 +240,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
             self._mark(node)
 
     def _expand_dead_locals(self, tree):
-        """Fixpoint over local declarations: a local whose initializer references
-        an already-removed value is itself dead, so its name joins
-        ``removed_value_refs`` and its later uses (including loop headers) are
-        stripped too. Without this, removing e.g. a state var ``xs`` leaves a
-        dangling ``for (..; i < n; ..)`` where ``uint n = xs.length;`` was cut."""
         changed = True
         while changed:
             changed = False
@@ -323,16 +257,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
                 stack.extend(n.children)
 
     def remove_nodes(self, nodes_to_remove: set, mode: str) -> str:
-        """
-        Removes nodes from Solidity source code.
-        
-        Args:
-            nodes_to_remove: Set of nodes to be removed
-            mode: Strategy for handling nodes (currently 'removal' is the primary mode for Solidity)
-        
-        Returns:
-            Modified source code as a string with nodes removed
-        """
         if mode not in ["removal"]:
             raise ValueError(f"Unknown mode: {mode}. Must be 'removal'")
 
@@ -341,21 +265,14 @@ class SolidityDeclarationRemoval(ASTRemoval):
         self.nodes_to_remove = nodes_to_remove
         self.removed_nodes = []
         self.removed_ranges = []
-        # Names of declarations being removed, used to also strip their references
-        # (inheritance, modifier usages, emits, library `using`s) so the reduced
-        # program keeps no dangling references.
         self.removed_contracts = {n.name for n in nodes_to_remove
                                   if n.node_type == "contract"}
         self.removed_events = {n.name for n in nodes_to_remove
                                if n.node_type == "event"}
         self.removed_modifiers = {n.name for n in nodes_to_remove
                                   if n.node_type == "modifier"}
-        # State vars / local vars / structs whose *uses* must also be stripped.
         self.removed_value_refs = {n.name for n in nodes_to_remove
                                    if n.node_type in ("state_var", "var", "struct")}
-        # Removing a contract takes all its members with it, so references to
-        # those members elsewhere (inherited modifier usages, emits, calls,
-        # state-var/struct uses) must be cleaned up too.
         for n in self.graph.nodes:
             if getattr(n.parent, "name", None) in self.removed_contracts:
                 if n.node_type == "modifier":
@@ -365,9 +282,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
                 elif n.node_type in ("state_var", "var", "struct"):
                     self.removed_value_refs.add(n.name)
 
-        # Type-use cascade (option B): removing a contract/struct also removes
-        # the declarations typed by it (followed via `uses-type` edges) and their
-        # uses, so no dangling type reference is left behind.
         expanded = set(self.nodes_to_remove)
         work = [n for n in self.nodes_to_remove
                 if n.node_type in ("contract", "struct")]
@@ -386,15 +300,10 @@ class SolidityDeclarationRemoval(ASTRemoval):
                     work.append(dependent)
         self.nodes_to_remove = expanded
 
-        # Transitively mark locals that become dead once the above values are
-        # removed, so their uses (e.g. in loop conditions) are stripped too.
         self._expand_dead_locals(tree)
 
         self.traverse_node(tree.root_node)
 
-        # Collect byte ranges to delete: whole removed nodes + explicit ranges
-        # (e.g. an `is Base` clause), then merge overlapping/nested ranges so a
-        # removed contract and its inner members produce a single clean edit.
         ranges = [(n.start_byte, n.end_byte) for n in self.removed_nodes]
         ranges.extend(self.removed_ranges)
         ranges.sort()
@@ -405,28 +314,16 @@ class SolidityDeclarationRemoval(ASTRemoval):
             else:
                 merged.append([start, end])
 
-        # Build the edit list: deletions (replace with nothing) plus the
-        # type-use placeholder retyping. A removed struct still referenced in a
-        # position deletion cannot touch (a parameter / return type) has that
-        # reference rewritten to a single placeholder `struct __S` seeded with
-        # the struct's members, so the program stays valid -- the fallback after
-        # deletion. References inside a deleted range are skipped.
         edits = [(s, e, b"") for s, e in merged]
         edits += self._placeholder_retype_edits(tree, merged)
         if not edits:
             return self.content
 
-        # Apply edits right-to-left over the exact bytes parsed above, NOT
-        # tree.root_node.text: when the source has leading/trailing whitespace
-        # (e.g. a leading comment stripped to blank lines), tree-sitter's root
-        # node starts after it, so root_node.text is shorter than the input and
-        # every absolute start_byte/end_byte would be misaligned -> corrupt cuts.
         source = self.content.encode("utf-8")
         for start, end, repl in sorted(edits, key=lambda e: e[0], reverse=True):
             source = source[:start] + repl + source[end:]
         return remove_empty_lines(source.decode("utf-8"))
 
-    # --- type-use placeholder retyping (fallback after deletion) -------------
 
     def _enclosing_contract_node(self, node):
         cur = node.parent
@@ -438,7 +335,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
 
     @staticmethod
     def _struct_members(struct_node):
-        """``(field name, field text)`` for each member of a struct node."""
         body = next((c for c in struct_node.children
                      if c.type == "struct_body"), None)
         if body is None:
@@ -447,16 +343,12 @@ class SolidityDeclarationRemoval(ASTRemoval):
                 for m in body.children if m.type == "struct_member"]
 
     def _retype_text(self, text, names):
-        """Rewrite whole-word occurrences of removed struct ``names`` (e.g. in a
-        copied member's type) to the placeholder, so nested uses stay valid."""
         for name in names:
             text = re.sub(rf"\b{re.escape(name)}\b",
                           self.PLACEHOLDER_STRUCT, text)
         return text
 
     def _placeholder_struct_decl(self, members, names):
-        """A one-line ``struct __S { ... }`` from member declarations, deduped by
-        field name (copy-all; the field text already carries its ``;``)."""
         seen, fields = set(), []
         for fname, text in members:
             if fname in seen:
@@ -466,9 +358,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
         return f"struct {self.PLACEHOLDER_STRUCT} {{ {' '.join(fields)} }}"
 
     def _placeholder_insert_pos(self, tree, contract_node):
-        """Where to inject a placeholder struct: just inside the enclosing
-        contract body (a struct must live in a contract in <0.6 Solidity), or
-        after the pragma for a file-level reference."""
         if contract_node is not None:
             body = next((c for c in contract_node.children
                          if c.type == "contract_body"), None)
@@ -482,26 +371,14 @@ class SolidityDeclarationRemoval(ASTRemoval):
         return pragma.end_byte if pragma is not None else 0
 
     def _placeholder_retype_edits(self, tree, deleted_ranges):
-        """Edits that retype surviving references to removed structs to a
-        per-contract placeholder ``struct __S``.
-
-        For each removed struct still referenced as a *type* outside any deleted
-        range (e.g. a function parameter), the reference is rewritten to ``__S``
-        and a ``struct __S`` carrying that struct's members is injected into (or
-        merged with an existing one in) the enclosing contract, so the reduced
-        program still type-checks. References that deletion already removes, and
-        references inside a placeholder we are about to rebuild, are left alone.
-        """
         removed = {n.name for n in self.nodes_to_remove
                    if n.node_type == "struct"
                    and n.name != self.PLACEHOLDER_STRUCT}
         if not removed:
             return []
 
-        # Members of each removed struct (only structs we can copy are retyped)
-        # and any pre-existing placeholder to merge into, keyed by contract id.
         members_by_struct = {}
-        existing = {}                 # enclosing contract id (or None) -> __S node
+        existing = {}
         stack = [tree.root_node]
         while stack:
             n = stack.pop()
@@ -523,7 +400,7 @@ class SolidityDeclarationRemoval(ASTRemoval):
             return any(rs <= start and end <= re_ for rs, re_ in ranges)
 
         edits = []
-        seeds = {}                    # contract id -> (contract node, {struct names})
+        seeds = {}
         stack = [tree.root_node]
         while stack:
             n = stack.pop()
@@ -534,9 +411,9 @@ class SolidityDeclarationRemoval(ASTRemoval):
             if name not in retypable:
                 continue
             if covered(n.start_byte, n.end_byte, deleted_ranges):
-                continue              # deletion already removes this reference
+                continue
             if covered(n.start_byte, n.end_byte, existing_ranges):
-                continue              # inside a placeholder we will rebuild below
+                continue
             edits.append((n.start_byte, n.end_byte,
                           self.PLACEHOLDER_STRUCT.encode("utf-8")))
             cnode = self._enclosing_contract_node(n)
@@ -546,7 +423,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
         if not edits:
             return []
 
-        # Inject (or rebuild) one placeholder per contract that gained a use.
         for key, (cnode, names) in seeds.items():
             members = []
             if key in existing:
@@ -562,7 +438,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
                 edits.append((pos, pos, f"\n    {decl}\n".encode("utf-8")))
         return edits
 
-    # --- inheritance-chain simplification (flattening) -----------------------
 
     @staticmethod
     def _contract_body(contract_node):
@@ -571,16 +446,12 @@ class SolidityDeclarationRemoval(ASTRemoval):
 
     @staticmethod
     def _is_constructor(member, contract_name):
-        # 0.5+ uses `constructor`; <=0.4.x names the constructor after the contract.
         if member.type == "constructor_definition":
             return True
         return (member.type == "function_definition"
                 and parsers.declaration_name(member) == contract_name)
 
     def _inheritance_clause_edit(self, child, base_name, replacement_names):
-        """Edit (start, end, text) that drops ``base_name`` from ``child``'s
-        inheritance list, substituting the base's own parents (rewiring the
-        chain) and tidying the ``is`` keyword / commas."""
         siblings = child.children
         specs = [c for c in siblings if c.type == "inheritance_specifier"]
         target = next((s for s in specs
@@ -601,20 +472,11 @@ class SolidityDeclarationRemoval(ASTRemoval):
             start = siblings[idx - 1].start_byte
         elif idx + 1 < len(siblings) and siblings[idx + 1].type == ",":
             end = siblings[idx + 1].end_byte
-        # if the base itself had parents, splice them in where it was
         extra = [n for n in replacement_names
                  if n not in {self._inheritance_base(s) for s in specs}]
         return (start, end, (", ".join(extra)) if extra else "")
 
     def flatten_inheritance(self, nodes_to_remove: set) -> str:
-        """Eliminate base contracts by promoting their members into the children
-        that inherit them, then deleting the base and rewiring the chain.
-
-        This de-shares inherited members so the base can be removed even when a
-        child still uses an inherited field/method -- a semantic-aware bulk
-        reduction. The result is validated by the property check, so unsound
-        cases (e.g. ``super``/diamond) are simply rejected.
-        """
         parser = parsers.get_parser(self.LANGUAGE)
         tree = parser.parse(self.content.encode("utf-8"))
         contracts = {}
@@ -627,7 +489,7 @@ class SolidityDeclarationRemoval(ASTRemoval):
 
         flatten_names = {n.name for n in nodes_to_remove
                          if n.node_type == "contract" and n.name in contracts}
-        edits = []        # (start, end, replacement_text); start==end => insert
+        edits = []
         flattened = False
         for base_name in flatten_names:
             base = contracts[base_name]
@@ -637,28 +499,25 @@ class SolidityDeclarationRemoval(ASTRemoval):
             members = [c for c in body.children
                        if c.type not in ("{", "}")
                        and not self._is_constructor(c, base_name)]
-            # `super` would lose its target once the chain is broken -> skip.
             if any(b"super." in m.text for m in members):
                 continue
             member_texts = [(parsers.declaration_name(m), m.text.decode("utf-8"))
                             for m in members]
             base_parents = [self._inheritance_base(s) for s in base.children
                             if s.type == "inheritance_specifier"]
-            # direct children: contracts whose inheritance list names the base
             children = [c for name, c in contracts.items()
                         if name != base_name
                         and any(s.type == "inheritance_specifier"
                                 and self._inheritance_base(s) == base_name
                                 for s in c.children)]
             if not children:
-                continue  # nothing inherits it; plain removal handles that
+                continue
             for child in children:
                 cbody = self._contract_body(child)
                 if cbody is None:
                     continue
                 existing = {parsers.declaration_name(c) for c in cbody.children
                             if c.type not in ("{", "}")}
-                # skip members the child overrides (avoids duplicate definitions)
                 to_add = [txt for nm, txt in member_texts if nm not in existing]
                 if to_add:
                     close = [c for c in cbody.children if c.type == "}"][-1]
@@ -672,9 +531,6 @@ class SolidityDeclarationRemoval(ASTRemoval):
 
         if not flattened:
             return self.content
-        # Use the parsed source itself (not tree.root_node.text, which omits any
-        # leading/trailing whitespace) so the absolute byte offsets in `edits`
-        # stay aligned -- see remove_nodes for the detailed rationale.
         out = self.content
         for start, end, text in sorted(edits, key=lambda e: e[0], reverse=True):
             out = out[:start] + text + out[end:]
@@ -809,7 +665,6 @@ class CDeclarationRemoval(ASTRemoval):
             if (removal_node.name == child_name
                 and node not in self.removed_nodes):
                 if child_name == "main":
-                    # keep main function but remove code
                     for main_child in node.children:
                         if main_child.type == "compound_statement":
                             for main_code in main_child.children:
@@ -826,7 +681,6 @@ class CDeclarationRemoval(ASTRemoval):
         return None
 
     def visit_function_definition(self, node):
-        """Collects function definition nodes to be removed."""
         node_type = None
         for child in node.children:
             if not node_type:
@@ -882,12 +736,9 @@ class CDeclarationRemoval(ASTRemoval):
                 return self._add_to_removed_nodes(removal_parent_node)
 
     def visit_call_expression(self, node):
-        """Identifies and handles method/function calls that use removed functions or variables."""
-        # call_expression uses variable from removed declaration in argument list
         for child in node.children:
             if child.type == "argument_list":
                 self._handle_call_expression_argument_list(child, node, None)
-            # call_expression uses removed function
             if child.type == "identifier":
                 self._handle_call_expression_identifier(child, node, None)
 
@@ -919,7 +770,6 @@ class CDeclarationRemoval(ASTRemoval):
                     return self._add_to_removed_nodes(node)
 
     def visit_expression_statement(self, node):
-        """Identifies expression statements that use removed declarations and marks them for removal or replacement."""
         for child in node.children:
             if child.type in ["call_expression", "assignment_expression", "update_expression"]:
                 for child_child in child.children:
@@ -931,7 +781,6 @@ class CDeclarationRemoval(ASTRemoval):
                                 self._handle_expression_statement_identifier(child_child_child, node, None)
 
     def visit_goto_statement(self, node):
-        """Collects goto statements for later analysis of associated labels."""
         if node not in self.goto_statements:
             self.goto_statements.append(node)
 
@@ -944,7 +793,6 @@ class CDeclarationRemoval(ASTRemoval):
             self._add_to_removed_nodes(node)
 
     def visit_labeled_statement(self, node):
-        """Handles labeled statements and removes associated goto statements if labels are removed."""
         for removal_node in self.removed_nodes:
             if not self._has_parent_node(node, removal_node):
                 continue
@@ -1011,7 +859,6 @@ class CDeclarationRemoval(ASTRemoval):
         self._add_declaration_to_removal_nodes(node, child_name, node_type)
 
     def visit_declaration(self, node):
-        """Processes variable and function declarations, marking them for removal if they match."""
         node_type = None
         for child in node.children:
             if not node_type:
@@ -1026,7 +873,6 @@ class CDeclarationRemoval(ASTRemoval):
                 return self._handle_declaration_function_declarator(child, node, node_type)
 
     def visit_if_statement(self, node):
-        """Marks if statements for removal if they use removed variables or are in removal list."""
         for removal_node in self.if_statements_to_remove:
             _, line_num = removal_node.name.split("_")
             if str(node.start_point[0]) == line_num:
@@ -1039,7 +885,6 @@ class CDeclarationRemoval(ASTRemoval):
                             return self._add_to_removed_nodes(node)
 
     def visit_for_statement(self, node):
-        """Marks for loops for removal if they use removed variables or are in removal list."""
         for removal_node in self.for_statements_to_remove:
             _, line_num = removal_node.name.split("_")
             if str(node.start_point[0]) == line_num:
@@ -1053,7 +898,6 @@ class CDeclarationRemoval(ASTRemoval):
                         return
 
     def visit_return_statement(self, node):
-        """Handles return statements in replacement mode when they contain removed variables."""
         for i, child in enumerate(node.children):
             if child.type == "return":
                 previous_node_child = child
@@ -1065,7 +909,6 @@ class CDeclarationRemoval(ASTRemoval):
                     )
 
     def visit_identifier(self, node):
-        """Identifies and handles identifier uses of removed declarations in different contexts."""
         node_text = node.text.decode("utf-8")
         if node_text in self.removed_declarations:
             parent_node = self._find_specific_parent_node(node, "if_statement")
@@ -1121,7 +964,6 @@ class CDeclarationRemoval(ASTRemoval):
                         )
 
     def visit_struct_specifier(self, node):
-        """Processes struct specifiers and removes struct declarations or their fields as needed."""
         for child in node.children:
             if child.type == "type_identifier":
                 struct_name = child.text.decode("utf-8")
@@ -1169,7 +1011,6 @@ class CDeclarationRemoval(ASTRemoval):
                                                 previous_node_child.end_point[1]
                                                 + len(constant_value.decode("utf-8")))
             else:
-                # When the replaced declaration is an identifier
                 constant_value = f"{self.constant_values[node_type]}".encode("utf-8")
                 new_end_byte = node.start_byte
                 new_end_byte_with_constant = node.start_byte + len(constant_value)
@@ -1191,19 +1032,6 @@ class CDeclarationRemoval(ASTRemoval):
 
 
     def remove_nodes(self, nodes_to_remove: set, mode: str) -> str:
-        """
-        Main entry point for node removal with support for three modes.
-        
-        Args:
-            nodes_to_remove: Set of nodes to be removed
-            mode: Strategy for handling nodes - 'removal', 'replacement', or 'combination'
-                - 'removal': Simply removes the identified nodes
-                - 'replacement': Replaces nodes with constant values based on their type
-                - 'combination': Iterates between replacement and removal until fixed point
-        
-        Returns:
-            Modified source code as a string with nodes removed or replaced
-        """
         if mode not in ["removal", "replacement", "combination"]:
             raise ValueError(
                 f"Unknown mode: {mode}. Must be 'removal', 'replacement', or "
@@ -1265,7 +1093,6 @@ class CDeclarationRemoval(ASTRemoval):
             self.replace_assignment_declarations(edits)
             edits.sort(key=lambda edit: edit["start_byte"], reverse=True)
         for edit in edits:
-            # Apply the edit to the tree
             if "new_text" in edit and mode in ["replacement", "combination"]:
                 tree.edit(
                     start_byte=edit["start_byte"],
@@ -1275,7 +1102,6 @@ class CDeclarationRemoval(ASTRemoval):
                     old_end_point=edit["old_end_point"],
                     new_end_point=edit["new_end_point_with_constant"],
                 )
-                # Update the source code
                 modified_code = (
                     modified_code[: edit["start_byte"]] +
                     modified_code[edit["start_byte"]:edit["new_end_byte"]] +
@@ -1291,7 +1117,6 @@ class CDeclarationRemoval(ASTRemoval):
                     old_end_point=edit["old_end_point"],
                     new_end_point=edit["new_end_point"],
                 )
-                # Update the source code
                 modified_code = (
                     modified_code[: edit["start_byte"]] +
                     modified_code[edit["start_byte"]:edit["new_end_byte"]] +
@@ -1306,36 +1131,38 @@ class CDeclarationRemoval(ASTRemoval):
 class JavaDeclarationRemoval(ASTRemoval):
     LANGUAGE = "java"
     count = 0
-    # Single placeholder type that a removed class/interface is retyped to; its
-    # constructions become ``((__A) null)``. See `_class_placeholder_edits`.
     PLACEHOLDER_CLASS = "__A"
+    CONSTANT_VALUES = {
+        "int": "42", "boolean": "true", "char": "'a'", "void": "",
+        "Boolean": "true", "Integer": "42", "String": "\"\"", "Object": "null",
+        "double": "0.0", "float": "0.0f", "Double": "0.0", "Float": "0.0f",
+        "byte": "0", "Byte": "0", "short": "0", "Short": "0",
+        "long": "0L", "Long": "0L",
+    }
+
+    @classmethod
+    def _const(cls, typ):
+        if typ is None:
+            return "null"
+        base = typ.strip()
+        return cls.CONSTANT_VALUES.get(base, f"(({base}) null)")
 
     def __init__(self, content, graph):
         super().__init__(content, graph)
         self.removed_nodes = []
         self.parser = parsers.get_parser(self.LANGUAGE)
-        self.tree = self.parser.parse(content.encode("utf-8"))
-        self.constant_values = {
-            "int": "42",
-            "boolean": "true",
-            "char": "'a'",
-            "void": "",
-            "Boolean": "true",
-            "Integer": "42",
-            "String": "\"\"",
-            "Object": "null",
-            "double": "0.0",
-            "float": "0.0f",
-            "Double": "0.0",
-            "Float": "0.0f",
-            "byte": "0",
-            "Byte": "0",
-            "short": "0",
-            "Short": "0",
-            "long": "0L",
-            "Long": "0L",
+        self._tree = None
+        self.constant_values = self.CONSTANT_VALUES
 
-        }
+    @property
+    def tree(self):
+        if self._tree is None:
+            self._tree = self.parser.parse(self.content.encode("utf-8"))
+        return self._tree
+
+    @tree.setter
+    def tree(self, value):
+        self._tree = value
 
     def visit_default(self, node):
         pass
@@ -1354,7 +1181,7 @@ class JavaDeclarationRemoval(ASTRemoval):
     def delete_nodes(self, tree=None):
         if tree is None:
             tree = self.tree
-        self.removed_nodes = self.filter_enclosing_nodes(self.removed_nodes)  # remove duplicates and nested nodes
+        self.removed_nodes = self.filter_enclosing_nodes(self.removed_nodes)
         self.removed_nodes.sort(key=lambda node: node.start_byte, reverse=True)
         source_code = tree.root_node.text
         modified_code = bytearray(source_code)
@@ -1391,10 +1218,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return result
 
     def break_inheritance(self, nodes_to_remove: set):
-        """Strips a class's own inheritance (``extends``/``implements``) and
-        neutralises its ``super`` uses -- deleting ``super(...)`` and discarded
-        ``super.m();`` statements, and constant-replacing a ``super.m()`` /
-        ``super.field`` read used as a value -- so removing the edge stays valid."""
         parser = parsers.get_parser(self.LANGUAGE)
         tree = parser.parse(self.content.encode("utf-8"))
         classes = self._all_class_asts(tree.root_node)
@@ -1412,7 +1235,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return self._apply_edits(self.content, edits)
 
     def visit_super_calls(self, tree):
-        """Handles super() constructor calls and removes their associated superclass inheritance."""
         query = parsers.JAVA_LANGUAGE.query("""
         (
         (explicit_constructor_invocation
@@ -1427,7 +1249,6 @@ class JavaDeclarationRemoval(ASTRemoval):
             while current is not None and current.type != "class_declaration":
                 current = current.parent
             if current is None:
-                # \No class declaration found for super call
                 continue
             for child in current.children:
                 if child.type == "superclass" or child.type == "super_interfaces":
@@ -1437,7 +1258,6 @@ class JavaDeclarationRemoval(ASTRemoval):
             self.removed_nodes.append(node)
 
     def visit_function_definition(self, node):
-        """Collects method definition nodes to be removed."""
         function_name = None
         for n in node.children:
             if n.type == "identifier":
@@ -1448,7 +1268,6 @@ class JavaDeclarationRemoval(ASTRemoval):
             self.removed_nodes.append(node)
 
     def visit_call_expression(self, node):
-        """Identifies and handles method calls that should be removed or replaced."""
         child = node.children[0]
         assert child.type == "expression"
         match child.children[0].type:
@@ -1475,19 +1294,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                         current_node = current_node.parent
 
     def remove_nodes(self, nodes_to_remove: set, mode: str = "removal") -> str:
-        """
-        Main entry point for node removal with support for three modes.
-        
-        Args:
-            nodes_to_remove: Set of nodes to be removed
-            mode: Strategy for handling nodes - 'removal' or 'replacement'
-                - 'removal': Simply removes the identified nodes
-                - 'replacement': Replaces nodes with constant values based on their type
-                - 'combination': Iterates between replacement and removal until fixed point
-        
-        Returns:
-            Modified source code as a string
-        """
         if mode not in ["removal", "replacement"]:
             raise ValueError(
                 f"Unknown mode: {mode}. Must be 'removal' or 'replacement'"
@@ -1503,12 +1309,11 @@ class JavaDeclarationRemoval(ASTRemoval):
         return result
 
     def remove_local_variable(self, node_to_remove, tree):
-        """Removes local variable declarations and all statements that use them."""
         name = node_to_remove.name
         decl_q = parsers.JAVA_LANGUAGE.query(f"""
         (local_variable_declaration
           declarator: (variable_declarator
-            name: (identifier) @var_name 
+            name: (identifier) @var_name
             (#eq? @var_name "{name}")
           )
         ) @decl
@@ -1527,7 +1332,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                     self.removed_nodes.append(stmt)
 
     def remove_class(self, node_to_remove, tree):
-        """Removes a class or interface declaration and all usages of that type."""
         name = node_to_remove.name
 
         query = parsers.JAVA_LANGUAGE.query(f"""
@@ -1577,7 +1381,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                 self.removed_nodes.append(node)
 
     def remove_function(self, node_to_remove, tree):
-        """Removes a method definition and all invocations of that method."""
         name = node_to_remove.name
         method_query_str = f'''(method_declaration name: (identifier) @func_name (#eq? @func_name "{name}")) @method'''
 
@@ -1615,7 +1418,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                 self.removed_nodes.append(node)
 
     def remove_constructor(self, node_to_remove, tree):
-        """Removes a constructor declaration."""
         name = node_to_remove.name
         constructor_query_str = f'''(constructor_declaration name: (identifier) @ctor_name (#eq? @ctor_name "{name}")) @ctor'''
         constructor_query = parsers.JAVA_LANGUAGE.query(constructor_query_str)
@@ -1624,7 +1426,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                 self.removed_nodes.append(node)
 
     def remove_field(self, node_to_remove, tree):
-        """Removes a field declaration and all statements that access it."""
         name = node_to_remove.name
         field_decl_query_str = f'''( (field_declaration declarator: (variable_declarator name: (identifier) @field_name value: (_) @field_value ) ) (#eq? @field_name "{name}") )'''
 
@@ -1677,7 +1478,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                     self.removed_nodes.append(node)
 
     def remove_nodes_(self, nodes_to_remove: set):
-        """Main removal logic that identifies and removes specific node types from the Java source."""
         self.removed_nodes = []
         self.count += 1
         parser = parsers.get_parser(self.LANGUAGE)
@@ -1720,17 +1520,12 @@ class JavaDeclarationRemoval(ASTRemoval):
                 return True
         return False
 
-    # --- replacement mode (atomic): remove decl + rewrite its uses ----------
 
     def _decl_type(self, decl_node):
         t = decl_node.child_by_field_name("type")
         return t.text.decode("utf-8").strip() if t is not None else None
 
     def _value_constant(self, typ):
-        """A constant expression standing in for a removed value of (lightweight)
-        type ``typ``. Reference / array / generic types fall back to a
-        parenthesized null cast, valid even in receiver position:
-        ``((T) null).m()``."""
         if typ is None:
             return "null"
         base = typ.strip()
@@ -1739,9 +1534,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return f"(({base}) null)"
 
     def _field_delete_range(self, field_decl, declarator):
-        """Range to delete for a field: the whole field_declaration when it
-        declares a single variable, else just this declarator (plus an adjacent
-        comma) so the others survive."""
         declarators = [c for c in field_decl.children
                        if c.type == "variable_declarator"]
         if len(declarators) <= 1:
@@ -1756,9 +1548,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return (start, end)
 
     def _decls_for(self, node_to_remove, root):
-        """``(declared type, [byte ranges to delete])`` for a function / field /
-        local. Functions match by name (and formal-parameter text when known);
-        fields and locals by declarator name."""
         name, kind = node_to_remove.name, node_to_remove.node_type
         typ, ranges = None, []
         stack = [root]
@@ -1795,8 +1584,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return typ, ranges
 
     def _use_kind(self, node):
-        """``'decl'`` (the declaration's own name) | ``'write'`` (assignment LHS
-        or ``++``/``--`` target) | ``'read'`` for an identifier / field_access."""
         vdecl = self.find_ancestor(node, "variable_declarator")
         if vdecl is not None:
             nm = vdecl.child_by_field_name("name")
@@ -1825,16 +1612,13 @@ class JavaDeclarationRemoval(ASTRemoval):
             cur = cur.parent
         return node
 
-    # --- class/interface removal -> __A placeholder -------------------------
 
     def _retype_type_text(self, text, removed):
-        """Rewrite whole-word occurrences of removed class names to ``__A``."""
         for nm in removed:
             text = re.sub(rf"\b{re.escape(nm)}\b", self.PLACEHOLDER_CLASS, text)
         return text
 
     def _all_class_asts(self, root):
-        """name -> class/interface declaration node, for every type in the file."""
         out = {}
         stack = [root]
         while stack:
@@ -1847,8 +1631,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return out
 
     def _a_typed_names(self, root, removed):
-        """var/field/param name -> removed class, for declarations whose type is
-        *directly* one of the removed classes (lightweight: no generic nesting)."""
         names = {}
         stack = [root]
         while stack:
@@ -1876,8 +1658,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return names
 
     def _receiver_class(self, recv, removed, typed_names):
-        """Best-effort removed-class of a receiver expression (``new A()``, a cast
-        to ``A``, an ``A``-typed name, or ``A`` itself for static access)."""
         if recv is None:
             return None
         if recv.type in ("object_creation_expression", "cast_expression"):
@@ -1892,7 +1672,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return None
 
     def _used_members(self, root, removed, typed_names):
-        """class -> {'methods': {...}, 'fields': {...}} accessed on its values."""
         used = {a: {"methods": set(), "fields": set()} for a in removed}
         stack = [root]
         while stack:
@@ -1938,8 +1717,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return f"{mods}{typ} {nm};"
 
     def _placeholder_members(self, removed, class_asts, used):
-        """Stub texts for the used members of the removed classes, copied (and
-        retyped) from their declarations; deduped by name across classes."""
         seen, out = set(), []
         for a, mem in used.items():
             ast = class_asts.get(a)
@@ -1965,17 +1742,14 @@ class JavaDeclarationRemoval(ASTRemoval):
         return out
 
     def _inheritance_drop_edit(self, type_node):
-        """Edit that drops a removed type from a ``extends``/``implements`` clause
-        (the whole clause if it was the only supertype, else just it + a comma)."""
         p = type_node.parent
         if p.type == "superclass":
             return (p.start_byte, p.end_byte, "")
-        # p.type == "type_list" (the implements list)
         supers = [c for c in p.children
                   if c.type in ("type_identifier", "generic_type",
                                 "scoped_type_identifier")]
         if len(supers) <= 1:
-            clause = p.parent                    # super_interfaces
+            clause = p.parent
             return (clause.start_byte, clause.end_byte, "")
         sibs = p.children
         idx = next((i for i, c in enumerate(sibs) if c.id == type_node.id), None)
@@ -1986,12 +1760,86 @@ class JavaDeclarationRemoval(ASTRemoval):
             end = sibs[idx + 1].end_byte
         return (start, end, "")
 
+    @staticmethod
+    def _generic_head(node):
+        for c in node.children:
+            if c.type in ("type_identifier", "scoped_type_identifier"):
+                return c
+        return None
+
+    def _names_removed(self, node, removed):
+        if node.type in ("type_identifier", "scoped_type_identifier"):
+            return node.text.decode("utf-8") in removed
+        if node.type == "generic_type":
+            h = self._generic_head(node)
+            return h is not None and h.text.decode("utf-8") in removed
+        return False
+
+    def _erase_type_arguments(self, ta, removed):
+        args = [c for c in ta.children if c.type not in ("<", ">", ",")]
+        if not args:
+            return []
+
+        def classify(a):
+            if a.type == "wildcard":
+                return "wild" if any(self._names_removed(c, removed)
+                                     for c in a.children) else None
+            return "arg" if self._names_removed(a, removed) else None
+
+        flags = [classify(a) for a in args]
+        if all(f == "arg" for f in flags):
+            return [(ta.start_byte, ta.end_byte, "")]
+        edits, sibs = [], ta.children
+        for a, f in zip(args, flags):
+            if f is None:
+                continue
+            if f == "wild":
+                edits.append((a.start_byte, a.end_byte, "?"))
+                continue
+            idx = next((i for i, c in enumerate(sibs) if c.id == a.id), None)
+            start, end = a.start_byte, a.end_byte
+            if idx is not None and idx > 0 and sibs[idx - 1].type == ",":
+                start = sibs[idx - 1].start_byte
+            elif idx is not None and idx + 1 < len(sibs) and sibs[idx + 1].type == ",":
+                end = sibs[idx + 1].end_byte
+            edits.append((start, end, ""))
+        return edits
+
+    def _erase_references(self, removed, root):
+        edits = []
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            t = n.type
+            if t == "object_creation_expression":
+                ty = n.child_by_field_name("type")
+                if ty is not None and self._names_removed(ty, removed):
+                    edits.append((n.start_byte, n.end_byte,
+                                  f"(({self.PLACEHOLDER_CLASS}) null)"))
+                continue
+            if t == "type_arguments":
+                edits.extend(self._erase_type_arguments(n, removed))
+                continue
+            if t == "type_identifier" and n.text.decode("utf-8") in removed:
+                ref = (n.parent if n.parent is not None
+                       and n.parent.type == "generic_type" else n)
+                p = ref.parent
+                pt = p.type if p is not None else None
+                if pt in ("superclass", "type_list"):
+                    edits.append(self._inheritance_drop_edit(ref))
+                elif pt == "type_bound":
+                    edits.append((p.start_byte, p.end_byte, ""))
+                elif pt == "wildcard":
+                    edits.append((p.start_byte, p.end_byte, "?"))
+                elif pt == "type_arguments":
+                    pass
+                else:
+                    edits.append((ref.start_byte, ref.end_byte,
+                                  self.PLACEHOLDER_CLASS))
+        return edits
+
     def _class_placeholder_edits(self, removed, root):
-        """All edits for removing the classes/interfaces in ``removed``: delete
-        their declarations, retype value-type usages to ``__A``, turn ``new A(..)``
-        into ``((__A) null)`` (valid even as a receiver), drop them from
-        inheritance clauses, and inject/merge a single ``class __A`` carrying the
-        members actually used on their values."""
         edits = []
         class_asts = self._all_class_asts(root)
         for a in removed:
@@ -1999,24 +1847,7 @@ class JavaDeclarationRemoval(ASTRemoval):
             if ast is not None:
                 edits.append((ast.start_byte, ast.end_byte, ""))
 
-        stack = [root]
-        while stack:
-            n = stack.pop()
-            stack.extend(n.children)
-            if n.type == "object_creation_expression":
-                t = n.child_by_field_name("type")
-                if t is not None and t.type == "type_identifier" \
-                        and t.text.decode("utf-8") in removed:
-                    # parenthesized cast: valid in receiver position too
-                    edits.append((n.start_byte, n.end_byte,
-                                  f"(({self.PLACEHOLDER_CLASS}) null)"))
-                continue
-            if n.type == "type_identifier" and n.text.decode("utf-8") in removed:
-                p = n.parent
-                if p is not None and p.type in ("superclass", "type_list"):
-                    edits.append(self._inheritance_drop_edit(n))
-                else:
-                    edits.append((n.start_byte, n.end_byte, self.PLACEHOLDER_CLASS))
+        edits.extend(self._erase_references(removed, root))
 
         typed_names = self._a_typed_names(root, removed)
         used = self._used_members(root, removed, typed_names)
@@ -2024,7 +1855,7 @@ class JavaDeclarationRemoval(ASTRemoval):
 
         append_text = ""
         existing = class_asts.get(self.PLACEHOLDER_CLASS)
-        if existing is not None:                 # merge into the existing __A
+        if existing is not None:
             body = existing.child_by_field_name("body")
             prior = [self._retype_type_text(c.text.decode("utf-8"), removed)
                      for c in (body.children if body else [])
@@ -2035,14 +1866,11 @@ class JavaDeclarationRemoval(ASTRemoval):
                 self.PLACEHOLDER_CLASS, "\n  ".join(all_members))
             edits.append((existing.start_byte, existing.end_byte, decl))
         else:
-            # Appended to the final text (not an edit) so it can't be swallowed
-            # by a deletion that runs to EOF (a removed class at end of file).
             decl = "class %s {\n  %s\n}" % (
                 self.PLACEHOLDER_CLASS, "\n  ".join(members))
             append_text = "\n" + decl + "\n"
         return edits, append_text
 
-    # --- inheritance flattening ---------------------------------------------
 
     @staticmethod
     def _class_body(node):
@@ -2064,7 +1892,7 @@ class JavaDeclarationRemoval(ASTRemoval):
     def _is_abstract_method(self, m):
         if m.type != "method_declaration":
             return False
-        if m.child_by_field_name("body") is None:      # `void f();` -> abstract
+        if m.child_by_field_name("body") is None:
             return True
         return any(c.type == "modifiers" and b"abstract" in c.text
                    for c in m.children)
@@ -2074,7 +1902,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return any(c.type == "type_parameters" for c in node.children)
 
     def _superclass_info(self, class_node):
-        """``(superclass node, base name, is_generic)`` for a class's ``extends``."""
         sc = class_node.child_by_field_name("superclass")
         if sc is None:
             return (None, None, False)
@@ -2100,8 +1927,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return out
 
     def _stmt_of(self, node):
-        """Nearest enclosing statement-like node, so a ``super`` use takes its
-        whole statement with it."""
         cur = node
         while cur is not None:
             if cur.type.endswith("statement") or cur.type in (
@@ -2119,8 +1944,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return None
 
     def _member_type_in(self, class_ast, name, kind):
-        """Declared type of a method's return value / a field, looked up by name
-        in a class body (one level; None if not found)."""
         body = class_ast.child_by_field_name("body") if class_ast is not None else None
         if body is None:
             return None
@@ -2142,8 +1965,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return None
 
     def _super_member_type(self, node, name, kind, classes):
-        """Type of ``super.<name>`` (method return / field), from the superclass
-        of the class enclosing ``node``."""
         cls = self._enclosing_class(node)
         if cls is None:
             return None
@@ -2153,12 +1974,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return self._member_type_in(classes.get(sup_name), name, kind)
 
     def _super_edits(self, scope, classes):
-        """Edits neutralising every ``super`` use in ``scope`` once its inheritance
-        edge is removed: ``super(...)`` and a discarded ``super.m();`` statement
-        are deleted; a ``super.m(...)`` / ``super.field`` *read* used as a value is
-        replaced by a constant of its (looked-up) type -- so e.g.
-        ``return super.v() + 1;`` becomes ``return 42 + 1;`` rather than being
-        deleted and leaving a method with no ``return``."""
         edits, stack = [], [scope]
         while stack:
             n = stack.pop()
@@ -2169,7 +1984,7 @@ class JavaDeclarationRemoval(ASTRemoval):
             if p is None:
                 continue
             if p.type == "explicit_constructor_invocation":
-                edits.append((p.start_byte, p.end_byte, ""))           # super(...)
+                edits.append((p.start_byte, p.end_byte, ""))
             elif p.type == "method_invocation":
                 if p.parent is not None and p.parent.type == "expression_statement":
                     edits.append((p.parent.start_byte, p.parent.end_byte, ""))
@@ -2193,16 +2008,12 @@ class JavaDeclarationRemoval(ASTRemoval):
         return edits
 
     def _clean_super(self, member, classes):
-        """``member``'s source with its ``super`` uses neutralised (deleted or
-        constant-replaced), so it can be promoted where ``super`` won't resolve."""
         base = member.start_byte
         rel = [(s - base, e - base, txt)
                for (s, e, txt) in self._super_edits(member, classes)]
         return self._apply_edits(member.text.decode("utf-8"), rel)
 
     def _apply_edits(self, content, edits):
-        """Apply ``(start, end, text)`` edits: dedup, drop any contained in a
-        larger edit (keeping zero-width insertions), then splice right-to-left."""
         uniq = {}
         for s, e, txt in edits:
             uniq.setdefault((s, e), txt)
@@ -2216,18 +2027,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         return src.decode("utf-8")
 
     def flatten_inheritance(self, nodes_to_remove: set):
-        """Eliminate base classes by promoting their members into the classes
-        that ``extends`` them, then deleting the base and rewiring ``extends``.
-
-        De-shares inherited members so a base can be removed even when a child
-        still uses one. Java-specific care: constructors and abstract methods are
-        not promoted, members the child already declares are skipped (no
-        duplicate/override clash), every ``@Override`` in the child is stripped
-        (its overridden target may be going away; removing the annotation is
-        always compile-safe) and every ``super`` statement (``super(...)`` and
-        ``super.member`` uses) is removed since ``super`` no longer resolves once
-        the edge is gone. We bail on generic supertypes; the gate handles the rest.
-        """
         parser = parsers.get_parser(self.LANGUAGE)
         tree = parser.parse(self.content.encode("utf-8"))
         classes = self._all_class_asts(tree.root_node)
@@ -2245,7 +2044,7 @@ class JavaDeclarationRemoval(ASTRemoval):
                 continue
             _, base_super, base_super_generic = self._superclass_info(base)
             if base_super is not None and base_super_generic:
-                continue                                  # can't rewire cleanly
+                continue
 
             members = []
             for m in body.children:
@@ -2259,8 +2058,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                     continue
                 members.append(m)
 
-            # Promote each member with its own `super` uses neutralised (a
-            # promoted member's `super` would no longer resolve).
             member_texts = [(self._member_name(m), self._clean_super(m, classes))
                             for m in members]
             children = [c for nm, c in classes.items()
@@ -2287,9 +2084,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                     child_edits.append((pos, pos, "\n" + "\n\n".join(to_add) + "\n"))
                 for ann in self._override_annotations(child):
                     child_edits.append((ann.start_byte, ann.end_byte, ""))
-                # The edge is going away, so `super` no longer resolves: delete
-                # super(...) and discarded super.m() statements, and constant-
-                # replace a super.m()/super.field read used as a value.
                 child_edits.extend(self._super_edits(child, classes))
                 scn = self._superclass_info(child)[0]
                 if scn is not None:
@@ -2299,7 +2093,7 @@ class JavaDeclarationRemoval(ASTRemoval):
                 continue
 
             edits.extend(child_edits)
-            edits.append((base.start_byte, base.end_byte, ""))   # delete the base
+            edits.append((base.start_byte, base.end_byte, ""))
             flattened = True
 
         if not flattened:
@@ -2307,24 +2101,18 @@ class JavaDeclarationRemoval(ASTRemoval):
         return remove_empty_lines(self._apply_edits(self.content, edits))
 
     def replace_nodes(self, nodes_to_remove: set):
-        """Replacement mode (atomic): delete each removed declaration AND rewrite
-        its uses. A read use becomes a constant of the declared type; a discarded
-        call, or an assignment/increment to a removed value, has its whole
-        statement deleted (a bare ``42;`` is not a legal Java statement; a
-        ``void`` call has no value); everything else stays valid. The property
-        check gates the result, so unsound rewrites are simply rejected."""
         parser = parsers.get_parser(self.LANGUAGE)
         tree = parser.parse(self.content.encode("utf-8"))
         root = tree.root_node
         self.nodes_to_remove = nodes_to_remove
 
         func_types, value_types = {}, {}
-        edits = []                               # (start, end, replacement_text)
+        edits = []
         for nd in nodes_to_remove:
             if nd.node_type not in ("function", "field", "local_variable"):
                 continue
             typ, ranges = self._decls_for(nd, root)
-            if not ranges:                       # decl not found -> don't touch
+            if not ranges:
                 continue
             (func_types if nd.node_type == "function" else value_types)[nd.name] = typ
             edits.extend((s, e, "") for (s, e) in ranges)
@@ -2341,7 +2129,7 @@ class JavaDeclarationRemoval(ASTRemoval):
                     if n.parent is not None \
                             and n.parent.type == "expression_statement":
                         edits.append((n.parent.start_byte,
-                                      n.parent.end_byte, ""))  # discarded call
+                                      n.parent.end_byte, ""))
                     else:
                         edits.append((n.start_byte, n.end_byte,
                                       self._value_constant(func_types[name])))
@@ -2366,8 +2154,6 @@ class JavaDeclarationRemoval(ASTRemoval):
                     continue
                 p = n.parent
                 if p is not None:
-                    # the `.field` of a field_access / the method `name` are
-                    # handled elsewhere; skip qualified-name / import segments.
                     fld = p.child_by_field_name("field")
                     nmc = p.child_by_field_name("name")
                     if (fld is not None and fld.id == n.id) \
@@ -2397,9 +2183,6 @@ class JavaDeclarationRemoval(ASTRemoval):
         if not edits and not append_text:
             return self.content
 
-        # Dedup, then drop edits contained inside a larger edit (a use inside a
-        # deleted statement, or a call inside a deleted decl), and apply
-        # right-to-left so byte offsets stay valid.
         uniq = {}
         for s, e, txt in edits:
             uniq.setdefault((s, e), txt)
@@ -2413,6 +2196,143 @@ class JavaDeclarationRemoval(ASTRemoval):
         result = source.decode("utf-8") + append_text
         self.content = result
         return result
+
+    def replacement_table(self):
+        root = self.tree.root_node
+        method_decls, field_decls, local_decls = {}, {}, {}
+        func_use, value_use = {}, {}
+
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type == "method_declaration":
+                nm = n.child_by_field_name("name")
+                if nm is not None:
+                    params = n.child_by_field_name("parameters")
+                    args = (params.text.decode("utf-8")
+                            if params is not None else None)
+                    method_decls.setdefault(nm.text.decode("utf-8"), []).append(
+                        (args, self._decl_type(n), (n.start_byte, n.end_byte)))
+            elif n.type == "field_declaration":
+                for d in n.children:
+                    if d.type != "variable_declarator":
+                        continue
+                    dn = d.child_by_field_name("name")
+                    if dn is not None:
+                        field_decls.setdefault(
+                            dn.text.decode("utf-8"), []).append(
+                            (self._decl_type(n), self._field_delete_range(n, d)))
+            elif n.type == "local_variable_declaration":
+                for d in n.children:
+                    if d.type != "variable_declarator":
+                        continue
+                    dn = d.child_by_field_name("name")
+                    if dn is not None:
+                        local_decls.setdefault(
+                            dn.text.decode("utf-8"), []).append(
+                            (self._decl_type(n), (n.start_byte, n.end_byte)))
+
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type == "method_invocation":
+                nm = n.child_by_field_name("name")
+                if nm is not None:
+                    name = nm.text.decode("utf-8")
+                    if n.parent is not None \
+                            and n.parent.type == "expression_statement":
+                        func_use.setdefault(name, []).append(
+                            (n.parent.start_byte, n.parent.end_byte, "delete"))
+                    else:
+                        func_use.setdefault(name, []).append(
+                            (n.start_byte, n.end_byte, "value"))
+                continue
+            if n.type == "field_access":
+                fld = n.child_by_field_name("field")
+                if fld is not None:
+                    name = fld.text.decode("utf-8")
+                    kind = self._use_kind(n)
+                    if kind == "write":
+                        st = self._enclosing_statement(n)
+                        value_use.setdefault(name, []).append(
+                            (st.start_byte, st.end_byte, "delete"))
+                    elif kind == "read":
+                        value_use.setdefault(name, []).append(
+                            (n.start_byte, n.end_byte, "value"))
+                continue
+            if n.type == "identifier":
+                name = n.text.decode("utf-8")
+                p = n.parent
+                if p is not None:
+                    fld = p.child_by_field_name("field")
+                    nmc = p.child_by_field_name("name")
+                    if (fld is not None and fld.id == n.id) \
+                            or (p.type == "method_invocation" and nmc is not None
+                                and nmc.id == n.id) \
+                            or p.type == "scoped_identifier":
+                        continue
+                if self.find_ancestor(n, "import_declaration") is not None \
+                        or self.find_ancestor(n, "package_declaration") is not None:
+                    continue
+                kind = self._use_kind(n)
+                if kind == "write":
+                    st = self._enclosing_statement(n)
+                    value_use.setdefault(name, []).append(
+                        (st.start_byte, st.end_byte, "delete"))
+                elif kind == "read":
+                    value_use.setdefault(name, []).append(
+                        (n.start_byte, n.end_byte, "value"))
+        return {"method_decls": method_decls, "field_decls": field_decls,
+                "local_decls": local_decls, "func_use": func_use,
+                "value_use": value_use}
+
+    @classmethod
+    def assemble_from_table(cls, content, sel, table):
+        func_types, value_types = {}, {}
+        edits = []
+        for nd in sel:
+            if nd.node_type == "function":
+                ms = [m for m in table["method_decls"].get(nd.name, [])
+                      if not (nd.args and m[0] is not None and m[0] != nd.args)]
+                if not ms:
+                    continue
+                func_types[nd.name] = ms[-1][1]
+                edits.extend((s, e, "") for (_, _, (s, e)) in ms)
+            elif nd.node_type == "field":
+                ms = table["field_decls"].get(nd.name, [])
+                if not ms:
+                    continue
+                value_types[nd.name] = ms[-1][0]
+                edits.extend((s, e, "") for (_, (s, e)) in ms)
+            elif nd.node_type == "local_variable":
+                ms = table["local_decls"].get(nd.name, [])
+                if not ms:
+                    continue
+                value_types[nd.name] = ms[-1][0]
+                edits.extend((s, e, "") for (_, (s, e)) in ms)
+        for name, typ in func_types.items():
+            for (s, e, kind) in table["func_use"].get(name, []):
+                edits.append((s, e, "") if kind == "delete"
+                             else (s, e, cls._const(typ)))
+        for name, typ in value_types.items():
+            for (s, e, kind) in table["value_use"].get(name, []):
+                edits.append((s, e, "") if kind == "delete"
+                             else (s, e, cls._const(typ)))
+        if not edits:
+            return content
+        uniq = {}
+        for s, e, txt in edits:
+            uniq.setdefault((s, e), txt)
+        spans = list(uniq)
+        kept = [(s, e, uniq[(s, e)]) for (s, e) in spans
+                if not any(os <= s and e <= oe and (os, oe) != (s, e)
+                           for (os, oe) in spans)]
+        source = bytearray(content.encode("utf-8"))
+        for s, e, txt in sorted(kept, key=lambda x: x[0], reverse=True):
+            source[s:e] = txt.encode("utf-8")
+        return source.decode("utf-8")
 
 
 AST_REMOVALS = {

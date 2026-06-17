@@ -140,3 +140,8 @@ build/
 
 # Ignore backup files with timestamp pattern
 **/*.orig
+
+# Oracle / compiler byproducts (javac), regenerable
+compile_err.txt
+a.out
+*.class

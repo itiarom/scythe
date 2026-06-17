@@ -12,11 +12,6 @@ resource.setrlimit(resource.RLIMIT_STACK, (2**29, -1))
 sys.setrecursionlimit(10**6)
 
 
-#example Solidity: greduce --source-file ./Solidity/smart2/ext_changed.sol --script ./Solidity/smart2/solidity2.sh
-#example C: greduce --source-file "./C/gcc-59903/small.c" --script "./C/gcc-59903/test_r.sh" --language c --mode "$mode"
-#example Java: greduce --source-file "./Java/generator_modified/iter_1/Main.java" --script "./Java/generator_modified/iter_1/run.sh" --language java --mode "$mode"
-
-# Argument parsing
 parser = argparse.ArgumentParser(
     description=('Modify Solidity files based on node removal and '
                  "Slither analysis, considering specified findings.")
@@ -93,8 +88,7 @@ def main():
                 f"or 'combination'."
             )
     elif args.language == "java":
-        # Replacement mode runs its own flatten + class-first flow below, so it
-        # skips the generic `break` pre-pass; other Java modes keep it.
+        parallel = False
         if args.mode == "replacement":
             passes = []
         else:
@@ -104,9 +98,6 @@ def main():
         if args.mode not in ["removal"]:
             raise ValueError(f"Unknown mode: {args.mode}. Must be 'removal'")
 
-        # Inheritance-chain simplification: flatten base contracts into the
-        # children that use their members, so the base can then be removed and
-        # the de-shared members reduced individually by the passes below.
         interesting.removal_mode = "flatten"
         interesting.mode = ["contract"]
         perform_dd(interesting, lambda n: n.node_type == "contract",
@@ -115,10 +106,6 @@ def main():
         graph = build_graph_from_file(file_path, args.language)
         interesting.graph = graph
 
-    # Solidity iterates the passes to a fixed point (removals enable further
-    # removals: e.g. dropping a local var's last use lets the var go on the next
-    # round); c/java run the loop once. The graph is rebuilt per pass so it
-    # matches the progressively reduced source.
     fixed_point = False
     while not fixed_point:
         before = utils.read_file(file_path)
@@ -151,7 +138,7 @@ def main():
 
                     interesting.graph = graph
                     interesting.mode = pass_
-                    perform_dd(interesting, lambda n: n.node_type in pass_, parallel=True)
+                    perform_dd(interesting, lambda n: n.node_type in pass_, parallel=False)
 
                 new = utils.read_file(file_path)
                 fixed_point_reached = (old == new)
@@ -213,40 +200,25 @@ def main():
                 if old_content == new_content:
                     fixed_point_reached = True
         elif args.mode == "replacement":
-            # Flatten inheritance + replacement, all iterated to a fixed point.
-            # Flatten runs *each round* (not just once up front): earlier removals
-            # / replacements can expose new flattening opportunities and vice-
-            # versa. It is safe to iterate -- every step is gated, and flatten
-            # makes monotonic progress (each accepted flatten deletes a base, and
-            # bases are finite), so the loop terminates. Removing whole classes
-            # (retyped to the __A placeholder) collapses the most code per check;
-            # remaining members become typed constants. The graph is rebuilt per
-            # pass to track the shrinking source.
             passes = [["function"], ["field"], ["class"], ["local_variable"]]
             fixed_point_reached = False
             while not fixed_point_reached:
                 old = utils.read_file(file_path)
 
-                # Promote a base's members into the classes that extend it, then
-                # delete the base.
                 graph = build_graph_from_file(file_path, args.language)
                 interesting.graph = graph
                 interesting.removal_mode = "flatten"
                 interesting.mode = ["class"]
                 perform_dd(interesting, lambda n: n.node_type == "class",
-                           parallel=False)
+                           parallel=True)
 
-                # Replace the remaining declarations with typed constants / __A.
                 interesting.removal_mode = "replacement"
                 for pass_ in passes:
                     graph = build_graph_from_file(file_path, args.language)
                     interesting.graph = graph
                     interesting.mode = pass_
-                    # Serial: each accepted removal mutates self.content / the file
-                    # and (for classes) injects the __A placeholder, so parallel
-                    # workers would race on that shared state and clobber accepts.
                     perform_dd(interesting, lambda n: n.node_type in pass_,
-                               parallel=False)
+                               parallel=True)
                 fixed_point_reached = (utils.read_file(file_path) == old)
 
     end_time = time.time()

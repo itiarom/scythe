@@ -7,13 +7,13 @@ class SolidityPropertyChecker():
         self.file_path = file_path
         self.test_script = test_script
 
-    def run_test_script(self, file_path: str) -> int:
+    def run_test_script(self, file_path: str, cwd: str = None) -> int:
         print(self.test_script)
         print(file_path)
         command = ["bash", self.test_script, file_path or self.file_path]
         try:
             result = subprocess.run(command, capture_output=True,
-                                    text=False)
+                                    text=False, cwd=cwd)
 
             return result.returncode
         except subprocess.CalledProcessError:
@@ -26,14 +26,14 @@ class CPropertyChecker():
         self.file_path = file_path
         self.test_script = test_script
 
-    def run_test_script(self, file_path: str) -> int:
+    def run_test_script(self, file_path: str, cwd: str = None) -> int:
         print(self.test_script)
         print(file_path)
         command = ["bash", self.test_script, file_path or self.file_path]
         try:
             while True:
                 result = subprocess.run(command, capture_output=True,
-                                        text=False)
+                                        text=False, cwd=cwd)
                 if ("exit 3" not in result.stdout.decode("utf-8") or
                     "exit 4 " not in result.stdout.decode("utf-8")
                 ):
@@ -49,12 +49,12 @@ class JavaPropertyChecker():
         self.file_path = file_path
         self.test_script = test_script
 
-    def run_test_script(self, file_path: str) -> int:
+    def run_test_script(self, file_path: str, cwd: str = None) -> int:
 
         command = ["bash", self.test_script, file_path or self.file_path]
         try:
             result = subprocess.run(command, capture_output=True,
-                                    text=False)
+                                    text=False, cwd=cwd)
             return result.returncode
         except subprocess.CalledProcessError:
             return -1
