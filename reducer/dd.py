@@ -159,10 +159,11 @@ def perform_dd(
         return
     cache = picire.parallel_dd.SharedCache(
         picire.cache.ConfigCache(cache_fail=True))
-    # Solidity re-runs the passes to a fixed point (main.py), so picire's own
-    # dd* intra-pass fixpoint is redundant there -- a single ddmin sweep per pass
-    # is already 1-minimal and roughly halves the test-script calls.
-    dd_star = language != "solidity"
+    # Solidity and Java both re-run their passes to a fixed point (main.py), so
+    # picire's own dd* intra-pass fixpoint is redundant there -- a single ddmin
+    # sweep per pass plus the outer loop is already 1-minimal and roughly halves
+    # the test-script calls. C runs the passes once, so it keeps dd*.
+    dd_star = language == "c"
     dd_obj = dd_cls(
         interesting,
         cache=cache,

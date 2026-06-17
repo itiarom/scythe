@@ -405,29 +405,10 @@ class JavaGraphBuilder(GraphBuilder):
                     except KeyError:
                         continue
 
-    def visit_interface_declaration(self, node):
-        class_name = ""
-        for n in node.children:
-            if n.type == "identifier":
-                class_name = n.text.decode("utf-8")
-                break
-        class_node = DeclarationNode(class_name, "class", None, is_interface=True)
-        self.graph.add_node(class_node)
-        self.push_declaration(class_node)
-        self.classes[class_node.name] = class_node
-
-        for child in node.children:
-            if child.type == "superclass":
-                parent_name = child.text.decode("utf-8").split("extends ")[-1]
-                if parent_name != class_name:
-                    try:
-                        parent_node = self.classes[parent_name]
-                        self.graph.add_edge(parent_node, class_node,
-                                            label="inherits")
-                    except KeyError:
-                        continue
-
-    def exit_contract_declaration(self, ctx):
+    def exit_scope(self, node):
+        """Pops the declaration pushed on entering a class/interface/method/
+        constructor, so `peek_declaration` always reflects the true enclosing
+        scope (and `parent` chains are correct)."""
         self.pop_declaration()
 
     def visit_function_definition(self, node):
@@ -504,16 +485,19 @@ class JavaGraphBuilder(GraphBuilder):
             "event_definition": self.visit_event_definition,
             "field_declaration": self.visit_field_declaration,
             "constructor_declaration": self.visit_function_definition,
-
+            "local_variable_declaration": self.visit_local_variable_declaration,
         }
         return visitors.get(node.type, self.visit_default)
 
     def get_node_exit(self, node):
+        # Pop every scope we pushed on enter, so nesting/parent is correct. The
+        # node types must match the Java grammar (method/class/...), not the
+        # Solidity ones -- keying them wrong leaves the stack growing forever.
         exit_funcs = {
-            "contract_declaration": self.exit_contract_declaration,
-            "interface_declaration": self.exit_contract_declaration,
-            "function_definition": self.exit_function_definition,
-            "local_variable_declaration": self.visit_local_variable_declaration,
+            "class_declaration": self.exit_scope,
+            "interface_declaration": self.exit_scope,
+            "method_declaration": self.exit_scope,
+            "constructor_declaration": self.exit_scope,
         }
         return exit_funcs.get(node.type, self.exit_default)
 

@@ -93,8 +93,13 @@ def main():
                 f"or 'combination'."
             )
     elif args.language == "java":
-        passes = ["class"]
-        interesting.removal_mode = "break"
+        # Replacement mode runs its own flatten + class-first flow below, so it
+        # skips the generic `break` pre-pass; other Java modes keep it.
+        if args.mode == "replacement":
+            passes = []
+        else:
+            passes = ["class"]
+            interesting.removal_mode = "break"
     else:
         if args.mode not in ["removal"]:
             raise ValueError(f"Unknown mode: {args.mode}. Must be 'removal'")
@@ -208,21 +213,41 @@ def main():
                 if old_content == new_content:
                     fixed_point_reached = True
         elif args.mode == "replacement":
-            passes = [["function"], ["field"], ["local_variable"]]
-            interesting.removal_mode = "replacement"
-
-            counter = 0
-
+            # Flatten inheritance + replacement, all iterated to a fixed point.
+            # Flatten runs *each round* (not just once up front): earlier removals
+            # / replacements can expose new flattening opportunities and vice-
+            # versa. It is safe to iterate -- every step is gated, and flatten
+            # makes monotonic progress (each accepted flatten deletes a base, and
+            # bases are finite), so the loop terminates. Removing whole classes
+            # (retyped to the __A placeholder) collapses the most code per check;
+            # remaining members become typed constants. The graph is rebuilt per
+            # pass to track the shrinking source.
+            passes = [["function"], ["field"], ["class"], ["local_variable"]]
+            fixed_point_reached = False
             while not fixed_point_reached:
                 old = utils.read_file(file_path)
+
+                # Promote a base's members into the classes that extend it, then
+                # delete the base.
+                graph = build_graph_from_file(file_path, args.language)
+                interesting.graph = graph
+                interesting.removal_mode = "flatten"
+                interesting.mode = ["class"]
+                perform_dd(interesting, lambda n: n.node_type == "class",
+                           parallel=False)
+
+                # Replace the remaining declarations with typed constants / __A.
+                interesting.removal_mode = "replacement"
                 for pass_ in passes:
                     graph = build_graph_from_file(file_path, args.language)
                     interesting.graph = graph
                     interesting.mode = pass_
-                    perform_dd(interesting, lambda n: n.node_type in pass_, parallel=True)
-                new = utils.read_file(file_path)
-                fixed_point_reached = (old == new)
-                counter += 1
+                    # Serial: each accepted removal mutates self.content / the file
+                    # and (for classes) injects the __A placeholder, so parallel
+                    # workers would race on that shared state and clobber accepts.
+                    perform_dd(interesting, lambda n: n.node_type in pass_,
+                               parallel=False)
+                fixed_point_reached = (utils.read_file(file_path) == old)
 
     end_time = time.time()
     elapsed_time = end_time - start_time

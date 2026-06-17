@@ -380,8 +380,10 @@ run_benchmark() {
 # ---- main -------------------------------------------------------------------
 mkdir -p "$OUTPUT_DIR"
 
-# Java needs a modern JVM to run Perses (unless we only run greduce).
-if [[ "$LANGUAGE" == "java" ]] && ! $ONLY_GREDUCE; then
+# Java needs a modern JVM to run Perses. Perses runs in the baseline (unless
+# --only-greduce) AND in greduce+perses (unless --only-perses); since those flags
+# are mutually exclusive, Perses always runs for Java, so always resolve it.
+if [[ "$LANGUAGE" == "java" ]]; then
     if ! resolve_perses_java; then
         echo "Error: no JDK >= 11 found to run Perses (install one via SDKMAN)." >&2
         exit 1

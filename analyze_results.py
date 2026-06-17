@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze a run_solidity_benchmarks.sh output directory.
+"""Analyze a run-benchmarks.sh output directory (Solidity or Java).
 
 For every benchmark in the output dir it reads the reduced programs and the
 per-method timings and reports a JSON object:
@@ -15,13 +15,14 @@ per-method timings and reports a JSON object:
     }
 
 Tokens are counted with tree-sitter (terminal nodes, excluding comments), the
-same parser greduce uses. A method is omitted for a benchmark if its reduced
-file is absent (e.g. it was not run). The output dir is self-contained:
-run_solidity_benchmarks.sh writes `original.sol` (the program the methods were
-reduced from) alongside the minimized files and `time`.
+same parser greduce uses. The language of each benchmark is detected from the
+`original.<ext>` file present (`.sol` -> Solidity, `.java` -> Java). A method is
+omitted for a benchmark if its reduced file is absent (e.g. it was not run). The
+output dir is self-contained: run-benchmarks.sh writes `original.<ext>` (the
+program the methods were reduced from) alongside the minimized files and `time`.
 
 Usage:
-    analyze_solidity_results.py [OUTPUT_DIR] [-o results.json]
+    analyze_results.py [OUTPUT_DIR] [-o results.json]
     (default OUTPUT_DIR: ./output; prints to stdout if -o is omitted)
 """
 import argparse
@@ -31,25 +32,34 @@ import sys
 
 from reducer import parsers
 
-# method name in the JSON -> (reduced-file name, key in the `time` file)
+# file extension -> (tree-sitter parser key, terminal node types that are
+# comments and must not be counted). tree-sitter-solidity emits `comment`;
+# tree-sitter-java emits `line_comment` / `block_comment`.
+LANGUAGES = {
+    "sol": ("solidity", {"comment"}),
+    "java": ("java", {"line_comment", "block_comment"}),
+}
+
+# method name in the JSON -> (reduced-file stem, key in the `time` file). The
+# extension is appended per detected language.
 METHODS = {
-    "perses": ("minimized_perses.sol", "perses"),
-    "greduce": ("minimized_greduce.sol", "greduce"),
-    "greduce-perses": ("minimized_greduce_perses.sol", "greduce_perses"),
+    "perses": ("minimized_perses", "perses"),
+    "greduce": ("minimized_greduce", "greduce"),
+    "greduce-perses": ("minimized_greduce_perses", "greduce_perses"),
 }
 
 
-def count_tokens(path):
-    """Number of terminal tokens in a Solidity file (comments excluded)."""
+def count_tokens(path, lang_key, comment_types):
+    """Number of terminal tokens in a source file (comments excluded)."""
     with open(path, "rb") as f:
-        tree = parsers.PARSERS["solidity"].parse(f.read())
+        tree = parsers.PARSERS[lang_key].parse(f.read())
     tokens = 0
     stack = [tree.root_node]
     while stack:
         node = stack.pop()
         if node.children:
             stack.extend(node.children)
-        elif node.type != "comment":
+        elif node.type not in comment_types:
             tokens += 1
     return tokens
 
@@ -76,16 +86,20 @@ def read_times(time_file):
 
 
 def analyze_benchmark(bench_dir):
-    original = os.path.join(bench_dir, "original.sol")
-    if not os.path.isfile(original):
+    # Detect the language from whichever original.<ext> is present.
+    for ext, (lang_key, comment_types) in LANGUAGES.items():
+        original = os.path.join(bench_dir, f"original.{ext}")
+        if os.path.isfile(original):
+            break
+    else:
         return None
-    entry = {"original": {"tokens": count_tokens(original)}}
+    entry = {"original": {"tokens": count_tokens(original, lang_key, comment_types)}}
     times = read_times(os.path.join(bench_dir, "time"))
-    for method, (reduced_name, time_key) in METHODS.items():
-        reduced = os.path.join(bench_dir, reduced_name)
+    for method, (stem, time_key) in METHODS.items():
+        reduced = os.path.join(bench_dir, f"{stem}.{ext}")
         if not os.path.isfile(reduced):
             continue
-        result = {"tokens": count_tokens(reduced)}
+        result = {"tokens": count_tokens(reduced, lang_key, comment_types)}
         if time_key in times:
             result["time"] = times[time_key]
         entry[method] = result
