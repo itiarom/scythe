@@ -16,7 +16,7 @@ TIMEOUTEXE=2
 TIMEOUTCCOMP=10
 CFILE=$(pwd)/${1:-program.c}
 CFLAG="-o t"
-CLANGFC="clang -m64 -O0 -Wall -fwrapv -ftrapv -fsanitize=undefined"
+CLANGFC="clang-14 -m64 -O0 -Wall -fwrapv -ftrapv -fsanitize=undefined"
 
 #################################################################################
 
@@ -25,7 +25,7 @@ CLANGFC="clang -m64 -O0 -Wall -fwrapv -ftrapv -fsanitize=undefined"
 rm -f out*.txt
 
 if
-  clang -pedantic -Wall -Wsystem-headers -O0 -c $CFILE  >out.txt 2>&1 &&\
+  clang-14 -pedantic -Wall -Wsystem-headers -O0 -c $CFILE  >out.txt 2>&1 &&\
   ! grep 'conversions than data arguments' out.txt &&\
   ! grep 'incompatible redeclaration' out.txt &&\
   ! grep 'ordered comparison between pointer' out.txt &&\
