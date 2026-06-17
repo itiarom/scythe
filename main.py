@@ -12,6 +12,10 @@ resource.setrlimit(resource.RLIMIT_STACK, (2**29, -1))
 sys.setrecursionlimit(10**6)
 
 
+#example Solidity: scythe --source-file ./Solidity/smart2/ext_changed.sol --script ./Solidity/smart2/solidity2.sh
+#example C: scythe --source-file "./C/gcc-59903/small.c" --script "./C/gcc-59903/test_r.sh" --language c --mode "$mode"
+#example Java: scythe --source-file "./Java/generator_modified/iter_1/Main.java" --script "./Java/generator_modified/iter_1/run.sh" --language java --mode "$mode"
+
 parser = argparse.ArgumentParser(
     description=('Modify Solidity files based on node removal and '
                  "Slither analysis, considering specified findings.")

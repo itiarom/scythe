@@ -1,12 +1,12 @@
-# GReduce
+# Scythe
 
-GReduce is a tool designed to minimize source code files by reducing their code, while keeping specific properties of the code. It supports both Solidity and C and is useful for simplifying code while retaining its functionality.
+Scythe is a tool designed to minimize source code files by reducing their code, while keeping specific properties of the code. It supports both Solidity and C and is useful for simplifying code while retaining its functionality.
 
 ## Installation/Setup
 
 **The project requires Python 3.10.14**
 
-To install GReduce, clone the repository:
+To install Scythe, clone the repository:
 
 ```bash
 git clone https://github.com/chamitro/call_reducer.git
@@ -21,7 +21,7 @@ pip install --editable .
 
 ## Solidity Setup`
 
-GReduce uses the Solidity compiler, and you can install multiple versions of it using solc-select. Follow these steps to install it:
+Scythe uses the Solidity compiler, and you can install multiple versions of it using solc-select. Follow these steps to install it:
 
 ```
 #Install solc-select
@@ -49,7 +49,7 @@ slither Solidity/smart2/original.sol
 
 ### Solidity Usage
 
-GReduce supports the following arguments for solidity:
+Scythe supports the following arguments for solidity:
 
 	- `--language`: Specify the programming language. Options: `solidity`, `java` or `c.``(Default: `"solidity"`)
 	- `--source-file`: The source file to minimize.
@@ -63,7 +63,7 @@ Each benchmark under `Solidity/smart*/` contains exactly three files:
 
 ### Example Usage
 
-To reduce a Solidity smart contract (e.g., `Solidity/smart2`), follow these steps. GReduce
+To reduce a Solidity smart contract (e.g., `Solidity/smart2`), follow these steps. Scythe
 minimizes its `--source-file` in place, so reduce a copy of `original.sol`:
 
 ```
@@ -74,8 +74,8 @@ solc-select use "$(cat Solidity/smart2/version)"
 cp Solidity/smart2/original.sol /tmp/program.sol
 python3 delete_comments.py --filepath /tmp/program.sol
 
-# Run GReduce on the copy, using the benchmark's test script
-greduce --source-file /tmp/program.sol --script ./Solidity/smart2/test.sh
+# Run Scythe on the copy, using the benchmark's test script
+scythe --source-file /tmp/program.sol --script ./Solidity/smart2/test.sh
 ```
 
 Note: For each smart contract, ensure that Slither runs with the appropriate Solidity compiler version. The `solc-select use <version>` command is mandatory before running Slither.
@@ -92,27 +92,27 @@ minimized programs to an output directory (token counts / performance are measur
 # Run a single benchmark
 ./run_solidity_benchmarks.sh -o output -b smart2
 
-# Run only the Perses baseline, or only greduce (+ Perses on greduce's output)
+# Run only the Perses baseline, or only scythe (+ Perses on scythe's output)
 ./run_solidity_benchmarks.sh -o output --only-perses
-./run_solidity_benchmarks.sh -o output --only-greduce
+./run_solidity_benchmarks.sh -o output --only-scythe
 ```
 
 For each benchmark `<name>` it produces:
 
 ```
-output/<name>/minimized_greduce.sol         # greduce on the original
-output/<name>/minimized_greduce_perses.sol  # Perses on greduce's output
+output/<name>/minimized_scythe.sol          # scythe on the original
+output/<name>/minimized_scythe_perses.sol   # Perses on scythe's output
 output/<name>/minimized_perses.sol          # baseline: Perses on the original
 output/<name>/time                          # one "method=seconds" line per method run
 ```
 
-The workflow runs greduce on the original, then Perses on greduce's result
-(`greduce+perses`), and separately Perses on the original (`perses` baseline). The
-`greduce_perses` time is the sum of the greduce and Perses passes.
+The workflow runs scythe on the original, then Perses on scythe's result
+(`scythe+perses`), and separately Perses on the original (`perses` baseline). The
+`scythe_perses` time is the sum of the scythe and Perses passes.
 
 ## C Setup
 
-Depending on the input script, GReduce uses multiple C compilers. In order to 
+Depending on the input script, Scythe uses multiple C compilers. In order to 
 avoid using multiple versions of LLVM or GCC we recommend using docker
 containers that contain the desired compiler version. In this project we provide
 images for the following versions:
@@ -133,7 +133,7 @@ If your script uses CompCert make sure to install the needed version.
 
 ### C Usage
 
-GReduce supports the following arguments for C:
+Scythe supports the following arguments for C:
 
 	- `--language`: Specify the programming language. Options: `solidity`, `java` or `c.``(Default: `"solidity"`)
 	- `--source-file`: The source file to minimize. (Default: `"ext_changed.sol"`)
@@ -150,9 +150,9 @@ To reduce a C program (e.g., `C/gcc-59903/small.c`) using the script `C/gcc-5990
 
 docker build -t <compiler version (e.g. gcc-4.8.0)>  --file <dockerfile path (e.g. ./dockerfiles/gcc_4_8.dockerfile)> .
 
-# Run GReduce on the source file
+# Run Scythe on the source file
 
-greduce --source-file ./C/gcc-5990/small.c --script ./C/gcc-5990/r.sh --language c --mode removal
+scythe --source-file ./C/gcc-5990/small.c --script ./C/gcc-5990/r.sh --language c --mode removal
 ```
 
 ### Running C Benchmarks
@@ -219,7 +219,7 @@ Before using the tool on Java programs, run the initial setup script first.
 
 ### Java Usage
 
-GReduce supports the following arguments:
+Scythe supports the following arguments:
 
 	- `--language`: Specify the programming language. Options: `solidity`, `java` or `c.``(Default: `"solidity"`)
 	- `--source-file`: The source file to minimize. (Default: `"ext_changed.sol"`)
@@ -231,9 +231,9 @@ GReduce supports the following arguments:
 To reduce a Java program (e.g., `Java/generator_modified/iter_1/Main.java`) using the script `Java/generator_modified/iter_1/run.sh`, follow these steps:
 
 ```
-# Run GReduce on the source file
+# Run Scythe on the source file
 
-greduce --source-file ./Java/generator_modified/iter_1/Main.java --script ./Java/generator_modified/iter_1/run.sh --language java --mode removal
+scythe --source-file ./Java/generator_modified/iter_1/Main.java --script ./Java/generator_modified/iter_1/run.sh --language java --mode removal
 ```
 
 ### Running Java Benchmarks

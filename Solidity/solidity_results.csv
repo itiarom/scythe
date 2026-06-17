@@ -1,4 +1,4 @@
-language,benchmark,initial_tokens,greduce_time,greduce_tokens,perses_time,perses_tokens,gp_time,gp_tokens
+language,benchmark,initial_tokens,scythe_time,scythe_tokens,perses_time,perses_tokens,gp_time,gp_tokens
 Solidity,smart1,1209,84.23,339,1105.72,187,99.12,183
 Solidity,smart2,1287,17.13,123,76.12,34,45.67,30
 Solidity,smart3,1644,81.12,130,340.85,85,158.26,85

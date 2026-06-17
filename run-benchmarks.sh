@@ -4,23 +4,23 @@
 # programs for three methods, so a separate script can later measure token
 # counts / performance.
 #
-#   greduce         : greduce on the original program
-#   greduce+perses  : Perses on the program produced by greduce
+#   scythe         : scythe on the original program
+#   scythe+perses  : Perses on the program produced by scythe
 #   perses          : baseline -- Perses on the original program
 #
 # For each benchmark <name> the following files are written under the output dir
 # (the extension is .sol for Solidity, .java for Java):
 #
 #   <out>/<name>/original.<ext>
-#   <out>/<name>/minimized_greduce.<ext>
-#   <out>/<name>/minimized_greduce_perses.<ext>
+#   <out>/<name>/minimized_scythe.<ext>
+#   <out>/<name>/minimized_scythe_perses.<ext>
 #   <out>/<name>/minimized_perses.<ext>
 #   <out>/<name>/time                       # one "method=seconds" line per method,
-#                                           # incl. greduce_perses = greduce + its Perses pass
+#                                           # incl. scythe_perses = scythe + its Perses pass
 #
 # Each benchmark dir holds exactly: original.<ext>, test.sh, version.
-#   Solidity (Solidity/smart*/): version = solc version;       greduce --mode removal
-#   Java     (Java/*/):          version = javac major (8/11);  greduce --mode replacement
+#   Solidity (Solidity/smart*/): version = solc version;       scythe --mode removal
+#   Java     (Java/*/):          version = javac major (8/11);  scythe --mode replacement
 #
 # Java specifics: the `version` file selects a JDK via SDKMAN (auto-installed if
 # missing). The oracle (test.sh) compiles with that JDK's `javac`, but Perses
@@ -34,7 +34,7 @@
 #     -o, --output DIR      Output directory (default: ./output)
 #     -b, --benchmark NAME  Run a single benchmark (e.g. smart2 / jdk-bugs-iter_1)
 #         --only-perses     Run only the Perses baseline
-#         --only-greduce    Run greduce and greduce+perses only (skip the baseline)
+#         --only-scythe    Run scythe and scythe+perses only (skip the baseline)
 #     -h, --help            Show this help
 
 set -uo pipefail
@@ -47,7 +47,7 @@ LANGUAGE="solidity"
 OUTPUT_DIR="output"
 BENCHMARK=""
 ONLY_PERSES=false
-ONLY_GREDUCE=false
+ONLY_SCYTHE=false
 
 # Resolved per benchmark (Java): the bin dir of the JDK its `version` selects.
 BENCH_JDK_BIN=""
@@ -67,29 +67,29 @@ while [[ $# -gt 0 ]]; do
         -o|--output)    OUTPUT_DIR="$2"; shift 2 ;;
         -b|--benchmark) BENCHMARK="$2"; shift 2 ;;
         --only-perses)  ONLY_PERSES=true; shift ;;
-        --only-greduce) ONLY_GREDUCE=true; shift ;;
+        --only-scythe) ONLY_SCYTHE=true; shift ;;
         -h|--help)      usage 0 ;;
         *) echo "Unknown parameter: $1" >&2; usage 1 ;;
     esac
 done
 
-if $ONLY_PERSES && $ONLY_GREDUCE; then
-    echo "Error: --only-perses and --only-greduce are mutually exclusive." >&2
+if $ONLY_PERSES && $ONLY_SCYTHE; then
+    echo "Error: --only-perses and --only-scythe are mutually exclusive." >&2
     exit 1
 fi
 
 # ---- per-language configuration ---------------------------------------------
 case "$LANGUAGE" in
-    solidity) BASE_DIR="Solidity"; EXT="sol";  BENCH_GLOB="smart*"; GREDUCE_MODE="removal" ;;
-    java)     BASE_DIR="Java";     EXT="java"; BENCH_GLOB="*";      GREDUCE_MODE="replacement" ;;
+    solidity) BASE_DIR="Solidity"; EXT="sol";  BENCH_GLOB="smart*"; SCYTHE_MODE="removal" ;;
+    java)     BASE_DIR="Java";     EXT="java"; BENCH_GLOB="*";      SCYTHE_MODE="replacement" ;;
     *) echo "Error: --language must be 'solidity' or 'java' (got '$LANGUAGE')." >&2; exit 1 ;;
 esac
 
-# greduce: prefer the in-repo venv, fall back to PATH.
-if [[ -x "$ROOT_DIR/.venv/bin/greduce" ]]; then
-    GREDUCE="$ROOT_DIR/.venv/bin/greduce"
+# scythe: prefer the in-repo venv, fall back to PATH.
+if [[ -x "$ROOT_DIR/.venv/bin/scythe" ]]; then
+    SCYTHE="$ROOT_DIR/.venv/bin/scythe"
 else
-    GREDUCE="greduce"
+    SCYTHE="scythe"
 fi
 
 [[ -f "$PERSES_JAR" ]] || { echo "Error: $PERSES_JAR not found." >&2; exit 1; }
@@ -245,8 +245,8 @@ resolve_reference_javac() {
 # Reduction drivers
 # =============================================================================
 
-# run_greduce <abs-source> <abs-test> ; reduces <source> in place, echoes seconds.
-run_greduce() {
+# run_scythe <abs-source> <abs-test> ; reduces <source> in place, echoes seconds.
+run_scythe() {
     local src="$1" test="$2" start end work
     start=$(date +%s)
     if [[ "$LANGUAGE" == "java" ]]; then
@@ -255,12 +255,12 @@ run_greduce() {
         # first on PATH so the oracle resolves the right javac.
         work="$(mktemp -d)"
         ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" \
-            "$GREDUCE" --source-file "$src" --script "$test" \
-                       --language java --mode "$GREDUCE_MODE" ) >/dev/null 2>&1
+            "$SCYTHE" --source-file "$src" --script "$test" \
+                       --language java --mode "$SCYTHE_MODE" ) >/dev/null 2>&1
         rm -rf "$work"
     else
-        "$GREDUCE" --source-file "$src" --script "$test" \
-                   --mode "$GREDUCE_MODE" >/dev/null 2>&1
+        "$SCYTHE" --source-file "$src" --script "$test" \
+                   --mode "$SCYTHE_MODE" >/dev/null 2>&1
     fi
     end=$(date +%s)
     echo $((end - start))
@@ -368,7 +368,7 @@ run_benchmark() {
     fi
 
     # Pre-flight: the property must hold on the original, else nothing can be
-    # reduced (Perses aborts at its own sanity check; greduce accepts no removal
+    # reduced (Perses aborts at its own sanity check; scythe accepts no removal
     # and returns the input unchanged). Turns a wrong compiler / incompatible
     # tool into a clear skip instead of silent empty output.
     if ! oracle_holds "$abs_test" "$staged"; then
@@ -386,24 +386,24 @@ run_benchmark() {
     cp "$staged" "$out/original.$EXT"
     local timefile="$out/time"; : > "$timefile"
 
-    local greduce_time=0
+    local scythe_time=0
     if ! $ONLY_PERSES; then
-        local g_out="$out/minimized_greduce.$EXT"
+        local g_out="$out/minimized_scythe.$EXT"
         cp "$staged" "$g_out"
-        echo "  [greduce] reducing..."
-        greduce_time=$(run_greduce "$(cd "$out" && pwd)/minimized_greduce.$EXT" "$abs_test")
-        echo "greduce=$greduce_time" >> "$timefile"
-        echo "  [greduce] ${greduce_time}s -> $g_out"
+        echo "  [scythe] reducing..."
+        scythe_time=$(run_scythe "$(cd "$out" && pwd)/minimized_scythe.$EXT" "$abs_test")
+        echo "scythe=$scythe_time" >> "$timefile"
+        echo "  [scythe] ${scythe_time}s -> $g_out"
 
-        echo "  [greduce+perses] reducing greduce output with Perses..."
+        echo "  [scythe+perses] reducing scythe output with Perses..."
         local gp_time
-        gp_time=$(run_perses "$(cd "$out" && pwd)/minimized_greduce.$EXT" \
-                             "$out/minimized_greduce_perses.$EXT" "$abs_test" "$version")
-        echo "greduce_perses=$((greduce_time + gp_time))" >> "$timefile"
-        echo "  [greduce+perses] $((greduce_time + gp_time))s (greduce ${greduce_time}s + perses ${gp_time}s)"
+        gp_time=$(run_perses "$(cd "$out" && pwd)/minimized_scythe.$EXT" \
+                             "$out/minimized_scythe_perses.$EXT" "$abs_test" "$version")
+        echo "scythe_perses=$((scythe_time + gp_time))" >> "$timefile"
+        echo "  [scythe+perses] $((scythe_time + gp_time))s (scythe ${scythe_time}s + perses ${gp_time}s)"
     fi
 
-    if ! $ONLY_GREDUCE; then
+    if ! $ONLY_SCYTHE; then
         echo "  [perses] baseline reducing original with Perses..."
         local p_time
         p_time=$(run_perses "$staged" "$out/minimized_perses.$EXT" "$abs_test" "$version")
@@ -418,7 +418,7 @@ run_benchmark() {
 mkdir -p "$OUTPUT_DIR"
 
 # Java needs a modern JVM to run Perses. Perses runs in the baseline (unless
-# --only-greduce) AND in greduce+perses (unless --only-perses); since those flags
+# --only-scythe) AND in scythe+perses (unless --only-perses); since those flags
 # are mutually exclusive, Perses always runs for Java, so always resolve it.
 if [[ "$LANGUAGE" == "java" ]]; then
     if ! resolve_perses_java; then

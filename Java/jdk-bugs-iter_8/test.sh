@@ -1,5 +1,5 @@
 #!/bin/bash
-# Property oracle. $1 = candidate path (greduce); otherwise the staged
+# Property oracle. $1 = candidate path (scythe); otherwise the staged
 # *.java in the cwd (Perses). Requires javac 11 on PATH (the benchmark
 # harness selects it from the sibling `version` file).
 start_time=$(date +%s)

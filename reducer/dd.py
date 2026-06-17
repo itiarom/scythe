@@ -29,7 +29,7 @@ class Interesting():
         self.language = language
 
         if language == "java":
-            _wd = tempfile.mkdtemp(prefix="greduce_")
+            _wd = tempfile.mkdtemp(prefix="scythe_")
             try:
                 res = prop_checker.run_test_script(None, cwd=_wd)
             finally:
@@ -153,7 +153,7 @@ class Interesting():
         name = ''.join(random.sample(string.ascii_letters + string.digits, 5))
         ext = self.EXT[self.language]
         if self.language == "java":
-            workdir = tempfile.mkdtemp(prefix="greduce_")
+            workdir = tempfile.mkdtemp(prefix="scythe_")
             temp_file_path = os.path.join(workdir, f"{name}.{ext}")
             try:
                 with open(temp_file_path, 'w') as temp_file:

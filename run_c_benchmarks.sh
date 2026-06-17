@@ -45,21 +45,21 @@ log_result() {
     echo "$folder,$script_type,$exec_time,$initial_line_count,$final_line_count,$initial_tokens,$final_tokens,$status,$timestamp" >> "$LOG_FILE"
 }
 
-# Function to run greduce with a specific mode
-run_greduce() {
+# Function to run scythe with a specific mode
+run_scythe() {
     local folder="$1"
     local mode="$2"
     sudo ./$BASE_DIR/$folder/test_r.sh $BASE_DIR/$folder/small.c
     sudo rm -f small.o
 
-    echo "[$(date)] Running greduce --mode $mode for $folder"
+    echo "[$(date)] Running scythe --mode $mode for $folder"
 
-    # Get initial counts before greduce
+    # Get initial counts before scythe
     local initial_line_count=$(count_lines "./$BASE_DIR/$folder/small.c")
     local initial_tokens=$(count_tokens_clang "./$BASE_DIR/$folder/small.c")
 
     local start_time=$(date +%s)
-    nice -n 15 greduce --source-file "./$BASE_DIR/$folder/small.c" \
+    nice -n 15 scythe --source-file "./$BASE_DIR/$folder/small.c" \
                                 --script "./$BASE_DIR/$folder/test_r.sh" \
                                 --language c \
                                 --mode "$mode"
@@ -77,8 +77,8 @@ run_greduce() {
         status="failed"
     fi
 
-    # Log greduce result with initial and final counts
-    log_result "$folder" "greduce_$mode" "$exec_time" "$initial_line_count" "$final_line_count" "$initial_tokens" "$final_tokens" "$status"
+    # Log scythe result with initial and final counts
+    log_result "$folder" "scythe_$mode" "$exec_time" "$initial_line_count" "$final_line_count" "$initial_tokens" "$final_tokens" "$status"
 
     # Run perses on the reduced file
     run_perses "$folder" "$mode"
@@ -164,14 +164,14 @@ process_folder() {
     # Run baseline perses on original file first
     run_perses "$folder" "baseline"
 
-#    # Run greduce with removal mode, then perses, then restore
-    run_greduce "$folder" "removal"
+#    # Run scythe with removal mode, then perses, then restore
+    run_scythe "$folder" "removal"
 
-#    # Run greduce with combination mode, then perses, then restore
-    run_greduce "$folder" "combination"
+#    # Run scythe with combination mode, then perses, then restore
+    run_scythe "$folder" "combination"
 
-#    # Run greduce with replacement mode, then perses, then restore
-    run_greduce "$folder" "replacement"
+#    # Run scythe with replacement mode, then perses, then restore
+    run_scythe "$folder" "replacement"
 
     echo "[$(date)] Completed processing $folder"
     echo ""

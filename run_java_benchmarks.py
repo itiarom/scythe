@@ -34,7 +34,7 @@ with open(removal_log_file, 'w') as removal_log:
         run_sh = iter_dir / "run.sh"
 
         command = [
-            "greduce",
+            "scythe",
             "--source-file", str(main_java),
             "--script", str(run_sh),
             "--mode", "removal",
@@ -91,7 +91,7 @@ with open(replacement_log_file, 'w') as replacement_log:
         run_sh = iter_dir / "run.sh"
 
         command = [
-            "greduce",
+            "scythe",
             "--source-file", str(main_java),
             "--script", str(run_sh),
             "--mode", "replacement",
@@ -147,7 +147,7 @@ with open(combination_log_file, 'w') as combination_log:
         run_sh = iter_dir / "run.sh"
 
         command = [
-            "greduce",
+            "scythe",
             "--source-file", str(main_java),
             "--script", str(run_sh),
             "--mode", "combination",

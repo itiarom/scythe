@@ -8,14 +8,14 @@ per-method timings and reports a JSON object:
       "<benchmark>": {
         "original":       {"tokens": <int>},
         "perses":         {"tokens": <int>, "time": <seconds>},
-        "greduce":        {"tokens": <int>, "time": <seconds>},
-        "greduce-perses": {"tokens": <int>, "time": <seconds>}
+        "scythe":        {"tokens": <int>, "time": <seconds>},
+        "scythe-perses": {"tokens": <int>, "time": <seconds>}
       },
       ...
     }
 
 Tokens are counted with tree-sitter (terminal nodes, excluding comments), the
-same parser greduce uses. The language of each benchmark is detected from the
+same parser scythe uses. The language of each benchmark is detected from the
 `original.<ext>` file present (`.sol` -> Solidity, `.java` -> Java). A method is
 omitted for a benchmark if its reduced file is absent (e.g. it was not run). The
 output dir is self-contained: run-benchmarks.sh writes `original.<ext>` (the
@@ -44,8 +44,8 @@ LANGUAGES = {
 # extension is appended per detected language.
 METHODS = {
     "perses": ("minimized_perses", "perses"),
-    "greduce": ("minimized_greduce", "greduce"),
-    "greduce-perses": ("minimized_greduce_perses", "greduce_perses"),
+    "scythe": ("minimized_scythe", "scythe"),
+    "scythe-perses": ("minimized_scythe_perses", "scythe_perses"),
 }
 
 
