@@ -1849,6 +1849,11 @@ class JavaDeclarationRemoval(ASTRemoval):
 
         edits.extend(self._erase_references(removed, root))
 
+        for cls_node in class_asts.values():
+            _, base_name, _ = self._superclass_info(cls_node)
+            if base_name is not None and base_name in removed:
+                edits.extend(self._super_edits(cls_node, class_asts))
+
         typed_names = self._a_typed_names(root, removed)
         used = self._used_members(root, removed, typed_names)
         members = self._placeholder_members(removed, class_asts, used)
