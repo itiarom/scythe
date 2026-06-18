@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Run the reduction benchmarks (Solidity or Java) and collect the minimized
+# Run the reduction benchmarks (Solidity, Java, or C) and collect the minimized
 # programs for three methods, so a separate script can later measure token
 # counts / performance.
 #
@@ -18,9 +18,11 @@
 #   <out>/<name>/time                       # one "method=seconds" line per method,
 #                                           # incl. scythe_perses = scythe + its Perses pass
 #
-# Each benchmark dir holds exactly: original.<ext>, test.sh, version.
+# Each benchmark dir holds exactly: original.<ext>, test.sh, version (C also
+# keeps r.sh, the pristine creduce script, for provenance).
 #   Solidity (Solidity/smart*/): version = solc version;       scythe --mode removal
 #   Java     (Java/*/):          version = javac major (8/11);  scythe --mode replacement
+#   C        (C/*/):             version = bug-compiler image;  scythe --mode replacement
 #
 # Java specifics: the `version` file selects a JDK via SDKMAN (auto-installed if
 # missing). The oracle (test.sh) compiles with that JDK's `javac`, but Perses
@@ -28,9 +30,16 @@
 # benchmark JDK is placed first on PATH -- the oracle subprocess Perses spawns
 # then resolves the right `javac` with no hardcoded paths.
 #
+# C specifics: the oracle pins its buggy/reference compilers via Docker, so the
+# `version` file is the bug-triggering image (e.g. gcc-4.8); it cannot be
+# auto-installed, and a missing image is a clean SKIP. The oracle bind-mounts the
+# candidate from $(pwd), so every method runs it with the candidate staged as
+# program.c in a throwaway cwd. Requires `docker` (the user must be able to run it
+# without sudo). No comment stripping is applied.
+#
 # Usage:
 #   ./run-benchmarks.sh [OPTIONS]
-#     -l, --language LANG   solidity (default) or java
+#     -l, --language LANG   solidity (default), java, or c
 #     -o, --output DIR      Output directory (default: ./output)
 #     -b, --benchmark NAME  Run a single benchmark (e.g. smart2 / jdk-bugs-iter_1)
 #         --only-perses     Run only the Perses baseline
@@ -82,7 +91,8 @@ fi
 case "$LANGUAGE" in
     solidity) BASE_DIR="Solidity"; EXT="sol";  BENCH_GLOB="smart*"; SCYTHE_MODE="removal" ;;
     java)     BASE_DIR="Java";     EXT="java"; BENCH_GLOB="*";      SCYTHE_MODE="replacement" ;;
-    *) echo "Error: --language must be 'solidity' or 'java' (got '$LANGUAGE')." >&2; exit 1 ;;
+    c)        BASE_DIR="C";        EXT="c";    BENCH_GLOB="*";      SCYTHE_MODE="replacement" ;;
+    *) echo "Error: --language must be 'solidity', 'java', or 'c' (got '$LANGUAGE')." >&2; exit 1 ;;
 esac
 
 # scythe: prefer the in-repo venv, fall back to PATH.
@@ -95,6 +105,9 @@ fi
 [[ -f "$PERSES_JAR" ]] || { echo "Error: $PERSES_JAR not found." >&2; exit 1; }
 if [[ "$LANGUAGE" == "solidity" ]]; then
     command -v solc-select >/dev/null || { echo "Error: solc-select not found." >&2; exit 1; }
+fi
+if [[ "$LANGUAGE" == "c" ]]; then
+    command -v docker >/dev/null || { echo "Error: docker not found (needed for the C oracles)." >&2; exit 1; }
 fi
 
 # =============================================================================
@@ -258,6 +271,17 @@ run_scythe() {
             "$SCYTHE" --source-file "$src" --script "$test" \
                        --language java --mode "$SCYTHE_MODE" ) >/dev/null 2>&1
         rm -rf "$work"
+    elif [[ "$LANGUAGE" == "c" ]]; then
+        # The C oracles assume the candidate sits in $(pwd) (they bind-mount it
+        # into the buggy-compiler container). Reduce a copy named program.c in a
+        # throwaway cwd so the oracle's byproducts (out*.txt, t, temp .c files)
+        # never litter the repo, then copy the reduced result back.
+        work="$(mktemp -d)"
+        cp "$src" "$work/program.c"
+        ( cd "$work" && "$SCYTHE" --source-file program.c --script "$test" \
+                       --language c --mode "$SCYTHE_MODE" ) >/dev/null 2>&1
+        cp "$work/program.c" "$src"
+        rm -rf "$work"
     else
         "$SCYTHE" --source-file "$src" --script "$test" \
                    --mode "$SCYTHE_MODE" >/dev/null 2>&1
@@ -284,14 +308,17 @@ run_perses() {
         # Perses runs on the modern JVM; the oracle it spawns inherits PATH, so
         # the benchmark JDK first on PATH gives the test script the right javac.
         PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" "$PERSES_JAVA" -jar "$PERSES_JAR" \
-            --enable-vulcan true \
+            --enable-latra true \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
             --output-dir "$persesout" >/dev/null 2>&1
     else
-        solc-select use "$version" >/dev/null 2>&1
+        # Solidity selects its solc; C needs no tool selection (the oracle pins
+        # its compilers via Docker). Perses stages the candidate as program.$EXT
+        # in its own cwd, which the test.sh resolves via ${1:-program.$EXT}.
+        [[ "$LANGUAGE" == "solidity" ]] && solc-select use "$version" >/dev/null 2>&1
         java -jar "$PERSES_JAR" \
-            --enable-vulcan true \
+            --enable-latra true \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
             --output-dir "$persesout" >/dev/null 2>&1
@@ -317,6 +344,12 @@ select_compiler() {
             ensure_solc "$version" || true
         fi
         solc-select use "$version" >/dev/null 2>&1
+    elif [[ "$LANGUAGE" == "c" ]]; then
+        # `version` is the bug-triggering Docker image (e.g. gcc-4.8). It cannot
+        # be auto-installed; a missing image yields a clean SKIP. (A benchmark may
+        # also need a second image for its reference compiler; if that one is
+        # missing the original-program preflight below catches it.)
+        docker image inspect "$version" >/dev/null 2>&1
     else
         ensure_jdk "$version"
     fi
@@ -329,6 +362,14 @@ oracle_holds() {
     if [[ "$LANGUAGE" == "java" ]]; then
         work="$(mktemp -d)"
         ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" bash "$test" "$candidate" ) >/dev/null 2>&1
+        rc=$?
+        rm -rf "$work"
+    elif [[ "$LANGUAGE" == "c" ]]; then
+        # Mirror the C oracle's "candidate lives in $(pwd)" contract: stage it as
+        # program.c in a throwaway cwd and invoke the test with no argument.
+        work="$(mktemp -d)"
+        cp "$candidate" "$work/program.c"
+        ( cd "$work" && bash "$test" ) >/dev/null 2>&1
         rc=$?
         rm -rf "$work"
     else

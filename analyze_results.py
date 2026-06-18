@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze a run-benchmarks.sh output directory (Solidity or Java).
+"""Analyze a run-benchmarks.sh output directory (Solidity, Java, or C).
 
 For every benchmark in the output dir it reads the reduced programs and the
 per-method timings and reports a JSON object:
@@ -16,7 +16,7 @@ per-method timings and reports a JSON object:
 
 Tokens are counted with tree-sitter (terminal nodes, excluding comments), the
 same parser scythe uses. The language of each benchmark is detected from the
-`original.<ext>` file present (`.sol` -> Solidity, `.java` -> Java). A method is
+`original.<ext>` file present (`.sol` -> Solidity, `.java` -> Java, `.c` -> C). A method is
 omitted for a benchmark if its reduced file is absent (e.g. it was not run). The
 output dir is self-contained: run-benchmarks.sh writes `original.<ext>` (the
 program the methods were reduced from) alongside the minimized files and `time`.
@@ -33,11 +33,12 @@ import sys
 from reducer import parsers
 
 # file extension -> (tree-sitter parser key, terminal node types that are
-# comments and must not be counted). tree-sitter-solidity emits `comment`;
-# tree-sitter-java emits `line_comment` / `block_comment`.
+# comments and must not be counted). tree-sitter-solidity and tree-sitter-c emit
+# `comment`; tree-sitter-java emits `line_comment` / `block_comment`.
 LANGUAGES = {
     "sol": ("solidity", {"comment"}),
     "java": ("java", {"line_comment", "block_comment"}),
+    "c": ("c", {"comment"}),
 }
 
 # method name in the JSON -> (reduced-file stem, key in the `time` file). The
