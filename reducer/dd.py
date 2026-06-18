@@ -66,7 +66,7 @@ class Interesting():
         if not nodes_to_remove:
             return picire.Outcome.FAIL
 
-        if self.language == "java":
+        if self.language in ("java", "c"):
             content = self._build_candidate(nodes_to_remove, mode)
             res = (picire.Outcome.FAIL if self._oracle(content) == 0
                    else picire.Outcome.PASS)
@@ -86,7 +86,7 @@ class Interesting():
 
     def _build_candidate(self, nodes_to_remove, mode):
         sel = set(nodes_to_remove)
-        if mode == "replacement" and sel \
+        if self.language == "java" and mode == "replacement" and sel \
                 and all(n.node_type in ("function", "field", "local_variable")
                         for n in sel):
             cls = AST_REMOVALS[self.language]
@@ -162,6 +162,16 @@ class Interesting():
                                                          cwd=workdir)
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
+        if self.language == "c":
+            # C oracle wants $1 = basename in cwd; per-call dir isolates workers.
+            workdir = tempfile.mkdtemp(prefix="scythe_")
+            fname = f"{name}.{ext}"
+            try:
+                with open(os.path.join(workdir, fname), 'w') as temp_file:
+                    temp_file.write(content)
+                return self.prop_checker.run_test_script(fname, cwd=workdir)
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
         temp_file_path = f"{name}.{ext}"
         with open(temp_file_path, 'w') as temp_file:
             temp_file.write(content)
@@ -224,7 +234,7 @@ def perform_dd(
         if nodes and interesting.remove_definitions(
                 set(), interesting.removal_mode) == picire.Outcome.FAIL:
             output_nodes = []
-        if interesting.language == "java":
+        if interesting.language in ("java", "c"):
             interesting._materialize_winner(
                 nodes, output_nodes, interesting.removal_mode)
         interesting.update_graph(
@@ -233,15 +243,14 @@ def perform_dd(
         return
     cache = picire.parallel_dd.SharedCache(
         picire.cache.ConfigCache(cache_fail=True))
-    dd_star = language == "c"
+    dd_star = False
     dd_obj = dd_cls(
         interesting,
         cache=cache,
         split=picire.splitter.BalancedSplit(n=2),
         dd_star=dd_star,
         config_iterator=picire.iterator.CombinedIterator(
-            False, picire.iterator.skip,
-            picire.iterator.random if language != 'c' else picire.iterator.backward
+            False, picire.iterator.skip, picire.iterator.random
         )
     )
     try:
@@ -251,7 +260,7 @@ def perform_dd(
         print("Reduction error")
         print(traceback.format_exc())
         return
-    if interesting.language == "java":
+    if interesting.language in ("java", "c"):
         interesting._materialize_winner(
             nodes, output_nodes, interesting.removal_mode)
     interesting.update_graph(

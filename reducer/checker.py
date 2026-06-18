@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 
@@ -5,7 +6,7 @@ class SolidityPropertyChecker():
 
     def __init__(self, file_path: str, test_script: str):
         self.file_path = file_path
-        self.test_script = test_script
+        self.test_script = os.path.abspath(test_script)
 
     def run_test_script(self, file_path: str, cwd: str = None) -> int:
         print(self.test_script)
@@ -24,7 +25,7 @@ class CPropertyChecker():
 
     def __init__(self, file_path: str, test_script: str):
         self.file_path = file_path
-        self.test_script = test_script
+        self.test_script = os.path.abspath(test_script)
 
     def run_test_script(self, file_path: str, cwd: str = None) -> int:
         print(self.test_script)
@@ -47,7 +48,7 @@ class JavaPropertyChecker():
 
     def __init__(self, file_path: str, test_script: str):
         self.file_path = file_path
-        self.test_script = test_script
+        self.test_script = os.path.abspath(test_script)
 
     def run_test_script(self, file_path: str, cwd: str = None) -> int:
 

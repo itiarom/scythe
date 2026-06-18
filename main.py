@@ -79,12 +79,10 @@ def main():
     parallel = True
 
     if args.language == "c":
-        parallel = False
+        parallel = True
         passes = [
-            ["for_statement", "if_statement"],
-            ["global_variable", "struct"],
             ["function"],
-            ["for_statement", "if_statement"],
+            ["global_variable", "struct"],
         ]
         if args.mode not in ["removal", "replacement", "combination"]:
             raise ValueError(
@@ -114,14 +112,14 @@ def main():
     while not fixed_point:
         before = utils.read_file(file_path)
         for pass_ in passes:
-            if args.language in ("java", "solidity"):
+            if args.language in ("java", "solidity", "c"):
                 graph = build_graph_from_file(file_path, args.language)
                 interesting.graph = graph
 
             interesting.mode = pass_
             perform_dd(interesting, lambda n: n.node_type in pass_,
                        parallel=parallel, language=args.language)
-        fixed_point = (args.language != "solidity"
+        fixed_point = (args.language not in ("solidity", "c")
                        or utils.read_file(file_path) == before)
 
     if args.language == "java":
