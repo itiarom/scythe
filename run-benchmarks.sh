@@ -308,7 +308,6 @@ run_perses() {
         # Perses runs on the modern JVM; the oracle it spawns inherits PATH, so
         # the benchmark JDK first on PATH gives the test script the right javac.
         PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" "$PERSES_JAVA" -jar "$PERSES_JAR" \
-            --enable-latra true \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
             --output-dir "$persesout" >/dev/null 2>&1
@@ -318,7 +317,6 @@ run_perses() {
         # in its own cwd, which the test.sh resolves via ${1:-program.$EXT}.
         [[ "$LANGUAGE" == "solidity" ]] && solc-select use "$version" >/dev/null 2>&1
         java -jar "$PERSES_JAR" \
-            --enable-latra true \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
             --output-dir "$persesout" >/dev/null 2>&1
