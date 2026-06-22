@@ -1,7 +1,7 @@
 #!/bin/bash
 BADCC1=()
 BADCC3=()
-BADCC2=("docker run --rm -v $(pwd):/work gcc-4.9 gcc -O3 /work/${1:-program.c} -o /work/t")
+BADCC2=("docker run --rm --label scythe_$$ -v $(pwd):/work gcc-4.9 gcc -O3 /work/${1:-program.c} -o /work/t")
 MODE=("-m64")
 
 # need to configure this part
@@ -68,7 +68,7 @@ then
   : # do nothing
 else
   echo "exit 1"
-  docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
   exit 1
 fi
 
@@ -80,7 +80,7 @@ if $USE_COMPCERT ; then
   ret=$?
   if [ $ret != 0 ] ; then
     echo "exit 2"
-    docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+    docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
     exit 1
   fi
 fi
@@ -91,7 +91,7 @@ readonly TEMP_EXE="temp.exe"
 timeout -s 9 $TIMEOUTCC $CLANG_MEM_SANITIZER $CFILE -o $TEMP_EXE > /dev/null
 if [[ $? != 0 ]] ; then
   echo "exit 3"
-  docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
   exit 1
 fi
 
@@ -99,13 +99,13 @@ readonly MEM_SANITIZER_OUTPUT="mem-sanitizer.output"
 (timeout -s 9 $TIMEOUTEXE ./$TEMP_EXE &> $MEM_SANITIZER_OUTPUT ) &> /dev/null
 if [[ $? != 0 ]] ; then
   echo "exit 4"
-  docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
   exit 1
 fi
 
 if grep -q "MemorySanitizer" $MEM_SANITIZER_OUTPUT ; then
   echo "exit 5"
-  docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
   exit 1
 fi
 
@@ -124,7 +124,7 @@ ret=$?
 
 if [ $ret != 0 ] ; then
   echo "exit 6"
-  docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
   exit 1
 fi
 
@@ -133,13 +133,13 @@ ret=$?
 
 if [ $ret != 0 ] ; then
   echo "exit 7"
-  docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
   exit 1
 fi
 
 if grep -q "runtime error" out0.txt ; then
   echo "exit 8"
-  docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
   exit 1
 fi
 
@@ -157,7 +157,7 @@ for ((i=0; i < ${#GOODCC[@]} ; ++i )) ; do
   ret=$?
   if [ $ret != 0 ] ; then
     echo "exit 9"
-    docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+    docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
     exit 1
   fi
 
@@ -166,7 +166,7 @@ for ((i=0; i < ${#GOODCC[@]} ; ++i )) ; do
   ret=$?
   if [ $ret != 0 ] ; then
     echo "exit 10"
-    docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+    docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
     exit 1
   fi
 
@@ -178,7 +178,7 @@ for ((i=0; i < ${#GOODCC[@]} ; ++i )) ; do
   # compare with reference: out0.txt
   if ! diff -q out0.txt out1.txt >/dev/null ; then
     echo "exit 11"
-    docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+    docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
     exit 1
   fi
 done
@@ -198,7 +198,7 @@ for cc in "${BADCC1[@]}" ; do
     ! grep -q 'clang: error: linker command failed with exit code 1 (use -v to see invocation)' out2.txt
     then
       echo "exit 12"
-      docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+      docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
       exit 1
     fi
   done
@@ -213,7 +213,7 @@ for cc in "${BADCC2[@]}" ; do
     ret=$?
     if [ $ret -ne 0 ] ; then
       echo "exit 13"
-      docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+      docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
       exit 1
     fi
 
@@ -222,7 +222,7 @@ for cc in "${BADCC2[@]}" ; do
     ret=$?
     if [ $ret -ne 136 ] ; then
       echo "exit 14"
-      docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+      docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
       exit 1
     fi
   done
@@ -237,7 +237,7 @@ for cc in "${BADCC3[@]}" ; do
     ret=$?
     if [ $ret != 0 ] ; then
       echo "exit 15"
-      docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+      docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
       exit 1
     fi
 
@@ -251,7 +251,7 @@ for cc in "${BADCC3[@]}" ; do
     # compare with reference: out0.txt
     if diff -q out0.txt out2.txt >/dev/null ; then
       echo "exit 16"
-      docker ps --filter "ancestor=gcc-4.9" --format "{{.ID}}" | xargs -r docker kill
+      docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
       exit 1
     fi
   done

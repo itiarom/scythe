@@ -1,7 +1,7 @@
 #!/bin/bash
 BADCC1=()
 BADCC2=()
-BADCC3=("docker run --rm -v $(pwd):/work clang-3.8.0 clang -Os /work/${1:-program.c} -o /work/t")
+BADCC3=("docker run --rm --label scythe_$$ -v $(pwd):/work clang-3.8.0 clang -Os /work/${1:-program.c} -o /work/t")
 MODE=("-m32")
 
 # need to configure this part
@@ -10,7 +10,7 @@ MODE=("-m32")
 #BADCC3=() # wrong results
 #MODE=-m64
 
-readonly GOODCC=("gcc -O0" "docker run --rm -v $(pwd):/workspace clang-3.7.0 clang -m32 -O1 /workspace/${1:-program.c} -o /workspace/t")
+readonly GOODCC=("gcc -O0" "docker run --rm --label scythe_$$ -v $(pwd):/workspace clang-3.7.0 clang -m32 -O1 /workspace/${1:-program.c} -o /workspace/t")
 readonly TIMEOUTCC=20
 readonly TIMEOUTEXE=4
 readonly TIMEOUTCCOMP=10

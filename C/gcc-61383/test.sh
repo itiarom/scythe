@@ -2,9 +2,9 @@
 
 # need to configure this part
 BADCC1=()  # compilation failures
-BADCC2=("docker run --rm -v $(pwd):/work gcc-4.9 gcc -m32 -O2 /work/${1:-program.c} -o /work/t" "docker run --rm -v $(pwd):/work gcc-4.9 gcc -m64 -O2 /work/${1:-program.c} -o /work/t")
+BADCC2=("docker run --rm --label scythe_$$ -v $(pwd):/work gcc-4.9 gcc -m32 -O2 /work/${1:-program.c} -o /work/t" "docker run --rm --label scythe_$$ -v $(pwd):/work gcc-4.9 gcc -m64 -O2 /work/${1:-program.c} -o /work/t")
 BADCC3=() # wrong results
-GOODCC=("docker run --rm -v $(pwd):/work gcc-4.9 gcc -m32 -O3 /work/${1:-program.c} -o /work/t" "docker run --rm -v $(pwd):/work gcc-4.9 gcc -m64 -O3 /work/${1:-program.c} -o /work/t")
+GOODCC=("docker run --rm --label scythe_$$ -v $(pwd):/work gcc-4.9 gcc -m32 -O3 /work/${1:-program.c} -o /work/t" "docker run --rm --label scythe_$$ -v $(pwd):/work gcc-4.9 gcc -m64 -O3 /work/${1:-program.c} -o /work/t")
 TIMEOUTCC=10
 TIMEOUTEXE=2
 TIMEOUTCCOMP=10

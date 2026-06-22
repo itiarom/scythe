@@ -1,5 +1,5 @@
 #!/bin/bash
-BADCC1=("docker run --rm -v $(pwd):/work clang-3.6.0-assertions clang -O3 /work/${1:-program.c} -o /work/t")
+BADCC1=("docker run --rm --label scythe_$$ -v $(pwd):/work clang-3.6.0-assertions clang -O3 /work/${1:-program.c} -o /work/t")
 BADCC2=()
 BADCC3=()
 MODE=-m64
@@ -10,7 +10,7 @@ MODE=-m64
 #BADCC3=() # wrong results
 #MODE=-m64
 
-GOODCC=("docker run --rm -v $(pwd):/workspace gcc-4.8 gcc -O0 /workspace/${1:-program.c} -o /workspace/t")
+GOODCC=("docker run --rm --label scythe_$$ -v $(pwd):/workspace gcc-4.8 gcc -O0 /workspace/${1:-program.c} -o /workspace/t")
 TIMEOUTCC=10
 TIMEOUTEXE=2
 TIMEOUTCCOMP=10

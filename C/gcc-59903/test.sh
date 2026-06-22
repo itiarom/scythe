@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # need to configure this part
-BADCC=("docker run --rm -v $(pwd)/${1:-program.c}:/usr/gcc/small.c theosotr/gcc-4.8.2 gcc -O3 /usr/gcc/small.c")
+BADCC=("docker run --rm --label scythe_$$ -v $(pwd)/${1:-program.c}:/usr/gcc/small.c theosotr/gcc-4.8.2 gcc -O3 /usr/gcc/small.c")
 GOODCC=("ccomp -fall")
 TIMEOUT=90
 CFILE=$(pwd)/${1:-program.c}
@@ -53,7 +53,7 @@ then
     : # do nothing
 else
     echo "exit 1"
-    docker ps --filter "ancestor=theosotr/gcc-4.8.2" --format "{{.ID}}" | xargs -r docker kill
+    docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
     exit 1
 fi
 
@@ -67,7 +67,7 @@ ret=$?
 
 if [ $ret != 0 ] ; then
     echo "exit 2"
-    docker ps --filter "ancestor=theosotr/gcc-4.8.2" --format "{{.ID}}" | xargs -r docker kill
+    docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
     exit 1
 fi
 
@@ -76,7 +76,7 @@ ret=$?
 
 if [ $ret != 0 ] ; then
     echo "exit 3"
-    docker ps --filter "ancestor=theosotr/gcc-4.8.2" --format "{{.ID}}" | xargs -r docker kill
+    docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
     exit 1
 fi
 
@@ -93,7 +93,7 @@ for cc in "${GOODCC[@]}" ; do
     	ret=$?
     	if [ $ret != 0 ] ; then
     	    echo "exit 4"
-    	    docker ps --filter "ancestor=theosotr/gcc-4.8.2" --format "{{.ID}}" | xargs -r docker kill
+    	    docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
     	    exit 1
     	fi
     fi
@@ -102,7 +102,7 @@ for cc in "${GOODCC[@]}" ; do
     ret=$?
     if [ $ret != 0 ] ; then
   echo "exit 5"
-  docker ps --filter "ancestor=theosotr/gcc-4.8.2" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
 	exit 1
     fi
 
@@ -111,14 +111,14 @@ for cc in "${GOODCC[@]}" ; do
     ret=$?
     if [ $ret != 0 ] ; then
   echo "exit 6"
-  docker ps --filter "ancestor=theosotr/gcc-4.8.2" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
 	exit 1
     fi
 
     # compare with reference: out0.txt
     if ! diff -q out0.txt out1.txt >/dev/null ; then
   echo "exit 7"
-  docker ps --filter "ancestor=theosotr/gcc-4.8.2" --format "{{.ID}}" | xargs -r docker kill
+  docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
 	exit 1
     fi
 done
@@ -132,7 +132,7 @@ for cc in "${BADCC[@]}" ; do
 
     if ! grep 'internal compiler error' out.txt ; then
       echo "exit 8"
-      docker ps --filter "ancestor=theosotr/gcc-4.8.2" --format "{{.ID}}" | xargs -r docker kill
+      docker ps --filter "label=scythe_$$" --format "{{.ID}}" | xargs -r docker kill
       exit 1
     fi
 done
