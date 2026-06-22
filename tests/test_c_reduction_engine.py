@@ -66,9 +66,8 @@ def _has_error(source):
     return bad
 
 
-@pytest.mark.parametrize("mode", ["replacement", "removal", "combination"])
-def test_c_reduction_removes_dead_functions(tmp_path, mode):
-    work = tmp_path / mode
+def test_c_reduction_removes_dead_functions(tmp_path):
+    work = tmp_path / "c"
     work.mkdir()
     prog = work / "program.c"
     prog.write_text(PROGRAM)
@@ -78,7 +77,7 @@ def test_c_reduction_removes_dead_functions(tmp_path, mode):
 
     result = subprocess.run(
         [SCYTHE, "--source-file", "program.c", "--script", str(test_sh),
-         "--language", "c", "--mode", mode],
+         "--language", "c"],
         cwd=str(work), capture_output=True, text=True, timeout=300,
     )
     assert result.returncode == 0, result.stderr
@@ -120,7 +119,7 @@ def test_c_reduction_many_functions_parallel(tmp_path):
 
     result = subprocess.run(
         [SCYTHE, "--source-file", "program.c", "--script", str(test_sh),
-         "--language", "c", "--mode", "replacement"],
+         "--language", "c"],
         cwd=str(work), capture_output=True, text=True, timeout=300,
     )
     assert result.returncode == 0, result.stderr

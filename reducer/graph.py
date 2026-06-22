@@ -1,10 +1,10 @@
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
+
 import networkx as nx
-from typing import NamedTuple, List, Any, Optional
 
 from reducer import parsers
 
-# Only track BIG arithmetic/logical expressions as collapse candidates — small
-# subexpressions are cheap for Perses and probing them is wasted oracle calls.
 EXPRESSION_MIN_BYTES = 40
 
 
@@ -21,569 +21,443 @@ class DeclarationNode(NamedTuple):
         node_name = f"{self.node_type}[{self.name}]"
         if self.parent is not None:
             return f"{str(self.parent)}.{node_name}"
-        else:
-            return node_name
+        return node_name
 
     def __repr__(self) -> str:
         return self.__str__()
 
 
+# --------------------------------------------------------------------------- #
+# Language-agnostic schema: a builder is described by a table of node specs    #
+# plus, for constructs that don't fit the declaration model, custom callables. #
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class InheritSpec:
+    parents: Callable          # ast node -> list[str] of parent names
+    target: str                # registry node_type to resolve parents against
+    lenient: bool = False      # skip unknown parents (Java) vs raise (Solidity)
+
+
+@dataclass(frozen=True)
+class NodeSpec:
+    node_type: str
+    names: Optional[Callable] = None   # ast node -> list[str]; default = declaration_name
+    sig: Optional[Callable] = None
+    scope: bool = False                # push as enclosing scope
+    parent_none: bool = False          # force parent=None, emit no containment edge
+    edge_label: str = "def"
+    register: bool = False             # index by name for inheritance lookup
+    inherit: Optional[InheritSpec] = None
+    type_use: Optional[Callable] = None  # ast node -> iterable[str] (uses-type targets)
+
+
+@dataclass
+class LanguageSchema:
+    language: str
+    specs: Dict[str, NodeSpec] = field(default_factory=dict)
+    custom: Dict[str, Callable] = field(default_factory=dict)
+    custom_exit: Dict[str, Callable] = field(default_factory=dict)
+    type_nodes: tuple = ()             # node_types resolvable as uses-type targets
+
+
 class GraphBuilder(parsers.TreeTraversal):
-    LANGUAGE: Optional[str] = None
+    SCHEMA: Optional[LanguageSchema] = None
 
     def __init__(self) -> None:
         self.graph = nx.DiGraph()
         self.declaration_stack: List[DeclarationNode] = []
+        self.registry: Dict[str, Dict[str, DeclarationNode]] = {}
+        self.current_function: Optional[DeclarationNode] = None
+        self._scope_nodes: List[int] = []
+        self._pending_type_uses: list = []
 
     def peek_declaration(self) -> Optional[DeclarationNode]:
-        if not self.declaration_stack:
-            return None
-        return self.declaration_stack[-1]
+        return self.declaration_stack[-1] if self.declaration_stack else None
 
     def push_declaration(self, node: DeclarationNode) -> None:
         self.declaration_stack.append(node)
 
     def pop_declaration(self) -> Optional[DeclarationNode]:
-        if not self.declaration_stack:
-            return None
-        return self.declaration_stack.pop()
+        return self.declaration_stack.pop() if self.declaration_stack else None
 
     def build_graph(self, source_file: str) -> nx.DiGraph:
-        assert self.LANGUAGE is not None, "LANGUAGE must be set in subclasses"
-        tree = parsers.parse(source_file, self.LANGUAGE)
-        root_node = tree.root_node
-        self.traverse_node(root_node)
-        self.finalize_graph()
+        assert self.SCHEMA is not None, "SCHEMA must be set in subclasses"
+        tree = parsers.parse(source_file, self.SCHEMA.language)
+        self.traverse_node(tree.root_node)
+        self._finalize_type_uses()
         return self.graph
 
-    def finalize_graph(self) -> None:
-        """Hook for post-traversal edge wiring (e.g. type-use dependencies)."""
-        pass
+    def get_node_visitor(self, node):
+        return self._visit
 
+    def get_node_exit(self, node):
+        return self._exit
 
-class SolidityGraphBuilder(GraphBuilder):
-    LANGUAGE: str = "solidity"
+    def _visit(self, node) -> None:
+        custom = self.SCHEMA.custom.get(node.type)
+        if custom is not None:
+            custom(self, node)
+            return
+        spec = self.SCHEMA.specs.get(node.type)
+        if spec is not None:
+            self._emit_spec(node, spec)
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.function_counter = 0
-        self.state_variable_counter = 0
-        self.local_variable_counter = 0
-        self.contracts: dict[str, DeclarationNode] = {}
-        # (declaration node, referenced user-type names) pending `uses-type` edges
-        self.pending_type_uses: list = []
+    def _exit(self, node) -> None:
+        custom = self.SCHEMA.custom_exit.get(node.type)
+        if custom is not None:
+            custom(self, node)
+            return
+        if self._scope_nodes and self._scope_nodes[-1] == node.id:
+            self._scope_nodes.pop()
+            self.pop_declaration()
 
-    def visit_default(self, node):
-        pass
+    def _emit_spec(self, node, spec: NodeSpec) -> None:
+        names_fn = spec.names or (lambda n: [parsers.declaration_name(n)])
+        parent = None if spec.parent_none else self.peek_declaration()
+        sig = spec.sig(node) if spec.sig else None
+        first = None
+        for name in names_fn(node):
+            decl = DeclarationNode(name, spec.node_type, parent, sig)
+            self.graph.add_node(decl)
+            if parent is not None and not spec.parent_none:
+                self.graph.add_edge(parent, decl, label=spec.edge_label)
+            if spec.register:
+                self.registry.setdefault(spec.node_type, {})[name] = decl
+            if spec.type_use is not None:
+                self._pending_type_uses.append((decl, set(spec.type_use(node))))
+            if first is None:
+                first = decl
+        if spec.scope and first is not None:
+            self.push_declaration(first)
+            self._scope_nodes.append(node.id)
+            if spec.inherit is not None:
+                self._process_inherit(first, node, spec.inherit)
 
-    def exit_default(self, node):
-        pass
+    def _process_inherit(self, decl, node, inherit: InheritSpec) -> None:
+        index = self.registry.get(inherit.target, {})
+        for parent_name in inherit.parents(node):
+            if parent_name == decl.name:
+                continue
+            parent = index.get(parent_name) if inherit.lenient else index[parent_name]
+            if parent is None:
+                continue
+            self.graph.add_edge(parent, decl, label="inherits")
 
-    def visit_contract_declaration(self, node):
-        contract_name = parsers.declaration_name(node)
-        contract_node = DeclarationNode(contract_name, "contract", None)
-        self.graph.add_node(contract_node)
-        self.push_declaration(contract_node)
-        self.contracts[contract_node.name] = contract_node
-
-        for child in node.children:
-            if child.type == "inheritance_specifier":
-                parent_name = child.text.decode("utf-8")
-                if parent_name != contract_name:
-                    parent_node = self.contracts[parent_name]
-                    self.graph.add_edge(parent_node, contract_node,
-                                        label="inherits")
-
-    def exit_contract_declaration(self, ctx):
-        self.pop_declaration()
-
-    def visit_function_definition(self, node):
-        func_name = parsers.declaration_name(node)
-        signature = parsers.parameter_signature(node)
-        parent_node = self.peek_declaration()
-        # Identity = (name, "function", enclosing-contract, parameter signature),
-        # so same-named functions in different contracts (or overloads) are
-        # distinct, removable nodes.
-        func_node = DeclarationNode(func_name, "function", parent_node, signature)
-        self.graph.add_node(func_node)
-        self.push_declaration(func_node)
-        self.current_function = func_node  # Set the current function context
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, func_node, label="def")
-
-    def exit_function_definition(self, node):
-        self.pop_declaration()
-
-    def visit_event_definition(self, node):
-        event_name = parsers.declaration_name(node)
-        parent_node = self.peek_declaration()
-        event_node = DeclarationNode(event_name, "event", parent_node)
-        self.graph.add_node(event_node)
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, event_node, label='def')
-
-    def visit_modifier_definition(self, node):
-        modifier_name = parsers.declaration_name(node)
-        parent_node = self.peek_declaration()
-        modifier_node = DeclarationNode(modifier_name, "modifier", parent_node)
-        self.graph.add_node(modifier_node)
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, modifier_node, label='def')
-
-    def visit_struct_declaration(self, node):
-        struct_name = parsers.declaration_name(node)
-        parent_node = self.peek_declaration()
-        struct_node = DeclarationNode(struct_name, "struct", parent_node)
-        self.graph.add_node(struct_node)
-        self.push_declaration(struct_node)
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, struct_node, label='def')
-
-    def exit_struct_declaration(self, node):
-        self.pop_declaration()
-
-    def visit_state_variable_declaration(self, node):
-        var_name = parsers.declaration_name(node)
-        parent_node = self.peek_declaration()
-        var_node = DeclarationNode(var_name, "state_var", parent_node)
-        self.graph.add_node(var_node)
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, var_node, label='def')
-        self.pending_type_uses.append(
-            (var_node, parsers.type_reference_names(node)))
-
-    def visit_variable_declaration(self, node):
-        var_name = parsers.declaration_name(node)
-        parent_node = self.peek_declaration()
-        var_node = DeclarationNode(var_name, "var", parent_node)
-        self.graph.add_node(var_node)
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, var_node, label='def')
-        self.pending_type_uses.append(
-            (var_node, parsers.type_reference_names(node)))
-
-    def finalize_graph(self) -> None:
-        """Add ``uses-type`` edges: struct/contract -> declaration typed by it,
-        so removing a type cascades (Interesting.update_graph + the remover's
-        type-use closure) to the state vars / locals that use it."""
+    def _finalize_type_uses(self) -> None:
+        if not self._pending_type_uses:
+            return
         type_nodes = {n.name: n for n in self.graph.nodes
-                      if n.node_type in ("contract", "struct")}
-        for var_node, type_names in self.pending_type_uses:
+                      if n.node_type in self.SCHEMA.type_nodes}
+        for decl, type_names in self._pending_type_uses:
             for type_name in type_names:
                 target = type_nodes.get(type_name)
-                if target is not None and target is not var_node:
-                    self.graph.add_edge(target, var_node, label="uses-type")
-
-    def get_node_visitor(self, node):
-        visitors = {
-            "contract_declaration": self.visit_contract_declaration,
-            "interface_declaration": self.visit_contract_declaration,
-            "function_definition": self.visit_function_definition,
-            "modifier_definition": self.visit_modifier_definition,
-            "event_definition": self.visit_event_definition,
-            "struct_declaration": self.visit_struct_declaration,
-            "state_variable_declaration": self.visit_state_variable_declaration,
-            "variable_declaration": self.visit_variable_declaration,
-        }
-        return visitors.get(node.type, self.visit_default)
-
-    def get_node_exit(self, node):
-        exit_funcs = {
-            "contract_declaration": self.exit_contract_declaration,
-            "interface_declaration": self.exit_contract_declaration,
-            "function_definition": self.exit_function_definition,
-            "struct_declaration": self.exit_struct_declaration,
-        }
-        return exit_funcs.get(node.type, self.exit_default)
+                if target is not None and target is not decl:
+                    self.graph.add_edge(target, decl, label="uses-type")
 
 
-class CGraphBuilder(GraphBuilder):
-    LANGUAGE: str = "c"
+# --------------------------------------------------------------------------- #
+# Solidity                                                                     #
+# --------------------------------------------------------------------------- #
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.function_counter = 0
-        self.state_variable_counter = 0
-        self.local_variable_counter = 0
-        self.current_function: Optional[DeclarationNode] = None
-        self.structs: dict[str, DeclarationNode] = {}
-        self.declarations: dict[str, DeclarationNode] = {}
+def _sol_inherit_parents(node):
+    return [c.text.decode("utf-8") for c in node.children
+            if c.type == "inheritance_specifier"]
 
-    def visit_default(self, node):
-        pass
 
-    def exit_default(self, node):
-        pass
+_SOL_CONTRACT = NodeSpec(
+    "contract", scope=True, parent_none=True, register=True,
+    inherit=InheritSpec(_sol_inherit_parents, "contract", lenient=False))
 
-    def add_function_declaration_node(self, node):
-        func_name = node.text.decode("utf-8")
-        parent_node = self.peek_declaration()
-        func_node = DeclarationNode(func_name, "function", parent_node)
-        self.graph.add_node(func_node)
-        self.push_declaration(func_node)
-        self.declarations[func_name] = func_node
-        self.current_function = func_node  # Set the current function context
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, func_node, label="def")
+SOLIDITY = LanguageSchema(
+    language="solidity",
+    type_nodes=("contract", "struct"),
+    specs={
+        "contract_declaration": _SOL_CONTRACT,
+        "interface_declaration": _SOL_CONTRACT,
+        "function_definition": NodeSpec(
+            "function", sig=parsers.parameter_signature, scope=True),
+        "modifier_definition": NodeSpec("modifier"),
+        "event_definition": NodeSpec("event"),
+        "struct_declaration": NodeSpec("struct", scope=True),
+        "state_variable_declaration": NodeSpec(
+            "state_var", type_use=parsers.type_reference_names),
+        "variable_declaration": NodeSpec(
+            "var", type_use=parsers.type_reference_names),
+    },
+)
 
-    def visit_function_definition(self, node):
-        for child in node.children:
-            if child.type == "function_declarator":
-                for child_child in child.children:
-                    if child_child.type == "identifier":
-                        self.add_function_declaration_node(child_child)
-                        break
-                    if child_child.type == "parenthesized_declarator":
-                        for child_child_child in child_child.children:
-                            if child_child_child.type == "identifier":
-                                self.add_function_declaration_node(child_child_child)
-                                break
 
-    def exit_function_definition(self, node):
-        self.pop_declaration()
-        self.current_function = None
+# --------------------------------------------------------------------------- #
+# Java                                                                         #
+# --------------------------------------------------------------------------- #
 
-    def add_global_variable(self, var_name):
-        if self.current_function:
-            var_node = DeclarationNode(var_name, "global_variable", self.current_function)
-            self.graph.add_node(var_node)
-            self.declarations[var_name] = var_node
-            self.push_declaration(var_node)
-            if self.current_function is not None:
-                self.graph.add_edge(self.current_function, var_node, label="var")
-        else:
-            parent_node = self.peek_declaration()
-            var_node = DeclarationNode(var_name, "global_variable", parent_node)
-            self.graph.add_node(var_node)
-            self.declarations[var_name] = var_node
-            self.push_declaration(var_node)
-            if parent_node is not None:
-                self.graph.add_edge(parent_node, var_node, label="var")
+def _first_identifier(node):
+    for child in node.children:
+        if child.type == "identifier":
+            return [child.text.decode("utf-8")]
+    return []
 
-    def visit_declaration(self, node):
-        global_variable = False
-        for child in node.children:
-            if (
-                child.type == "storage_class_specifier"
-                and child.text.decode("utf-8") == "static"
-            ):
-                global_variable = True
+
+def _java_method_sig(node):
+    for child in node.children:
+        if child.type == "formal_parameters":
+            return child.text.decode("utf-8")
+    return None
+
+
+def _java_declarator_names(node):
+    names = []
+    for child in node.children:
+        if child.type == "variable_declarator":
+            name_node = child.child_by_field_name("name")
+            if name_node:
+                names.append(name_node.text.decode("utf-8"))
+    return names
+
+
+def _java_inherit_parents(node):
+    return [c.text.decode("utf-8").split("extends ")[-1]
+            for c in node.children if c.type == "superclass"]
+
+
+_JAVA_CLASS = NodeSpec(
+    "class", names=_first_identifier, scope=True, parent_none=True, register=True,
+    inherit=InheritSpec(_java_inherit_parents, "class", lenient=True))
+
+JAVA = LanguageSchema(
+    language="java",
+    specs={
+        "class_declaration": _JAVA_CLASS,
+        "interface_declaration": _JAVA_CLASS,
+        "method_declaration": NodeSpec(
+            "function", names=_first_identifier, sig=_java_method_sig, scope=True),
+        "constructor_declaration": NodeSpec(
+            "constructor", names=_first_identifier, sig=_java_method_sig, scope=True),
+        "field_declaration": NodeSpec("field", names=_java_declarator_names),
+        "local_variable_declaration": NodeSpec(
+            "local_variable", names=_java_declarator_names),
+    },
+)
+
+
+# --------------------------------------------------------------------------- #
+# C — the declaration model plus value/block simplification fragments. These   #
+# don't fit NodeSpec (anonymous, byte-range identity, current-function state), #
+# so they stay as explicit handlers dispatched from the shared engine.         #
+# --------------------------------------------------------------------------- #
+
+_C_EXPR_VALUE_TYPES = ("binary_expression", "call_expression",
+                       "conditional_expression", "parenthesized_expression")
+
+
+def _c_add_function(builder, ident):
+    name = ident.text.decode("utf-8")
+    parent = builder.peek_declaration()
+    func = DeclarationNode(name, "function", parent)
+    builder.graph.add_node(func)
+    builder.push_declaration(func)
+    builder.symbols[name] = func
+    builder.current_function = func
+    if parent is not None:
+        builder.graph.add_edge(parent, func, label="def")
+
+
+def _c_function_definition(builder, node):
+    for child in node.children:
+        if child.type != "function_declarator":
+            continue
+        for cc in child.children:
+            if cc.type == "identifier":
+                _c_add_function(builder, cc)
                 break
-        if global_variable:
-            # A `static` declaration whose declarator is a function_declarator is
-            # a prototype, not a data global; its name collides with the function
-            # so don't emit it as a removable global_variable node.
-            if any(c.type == "function_declarator" for c in node.children):
-                return
-            for child in node.children:
-                if child.type == "identifier":
-                    var_name = child.text.decode("utf-8")
-                    self.add_global_variable(var_name)
-                elif child.type in [
-                    "init_declarator", "array_declarator"
-                ]:
-                    for child_child in child.children:
-                        if child_child.type == "identifier":
-                            var_name = child_child.text.decode("utf-8")
-                            self.add_global_variable(var_name)
+            if cc.type == "parenthesized_declarator":
+                for ccc in cc.children:
+                    if ccc.type == "identifier":
+                        _c_add_function(builder, ccc)
+                        break
 
-    def exit_declaration(self, node):
-        pass
 
-    def _add_block_node(self, node):
-        # Identity = the block's byte range in the CURRENT source (args), not a
-        # line number; the probe rebuilds the graph each round so offsets stay
-        # fresh. repl = "" when the block sits in a real block, else ";" so
-        # deleting an unbraced control body leaves a valid empty statement.
-        repl = "" if (node.parent is not None and node.parent.type in (
-            "compound_statement", "translation_unit", "declaration_list")
-        ) else ";"
-        name = f"{node.type}@{node.start_byte}:{node.end_byte}"
-        block = DeclarationNode(name, node.type, self.current_function,
-                                (node.start_byte, node.end_byte, repl))
-        self.graph.add_node(block)
-        if self.current_function is not None:
-            self.graph.add_edge(self.current_function, block, label="block")
+def _c_exit_function_definition(builder, node):
+    builder.pop_declaration()
+    builder.current_function = None
 
-    def visit_for_statement(self, node):
-        self._add_block_node(node)
 
-    def exit_for_statement(self, node):
-        pass
+def _c_add_global(builder, name):
+    parent = builder.current_function or builder.peek_declaration()
+    var = DeclarationNode(name, "global_variable", parent)
+    builder.graph.add_node(var)
+    builder.symbols[name] = var
+    builder.push_declaration(var)
+    if parent is not None:
+        builder.graph.add_edge(parent, var, label="var")
 
-    def visit_if_statement(self, node):
-        self._add_block_node(node)
 
-    def exit_if_statement(self, node):
-        pass
+def _c_declaration(builder, node):
+    if not any(c.type == "storage_class_specifier"
+               and c.text.decode("utf-8") == "static" for c in node.children):
+        return
+    # A static function prototype's name collides with the function node.
+    if any(c.type == "function_declarator" for c in node.children):
+        return
+    for child in node.children:
+        if child.type == "identifier":
+            _c_add_global(builder, child.text.decode("utf-8"))
+        elif child.type in ("init_declarator", "array_declarator"):
+            for cc in child.children:
+                if cc.type == "identifier":
+                    _c_add_global(builder, cc.text.decode("utf-8"))
 
-    def visit_initializer_list(self, node):
-        # Value simplification: an aggregate initializer `{...}` collapses to
-        # `{0}` in one shot (Perses reduces it element by element). Only the
-        # OUTERMOST list is a node; collapsing it subsumes any nested lists.
-        if node.parent is not None and node.parent.type == "initializer_list":
+
+def _c_add_block(builder, node):
+    # args carry the structural fact (in_block); the engine maps it to the
+    # deletion text ("" inside a block, ";" for an unbraced control body).
+    in_block = node.parent is not None and node.parent.type in (
+        "compound_statement", "translation_unit", "declaration_list")
+    name = f"{node.type}@{node.start_byte}:{node.end_byte}"
+    block = DeclarationNode(name, node.type, builder.current_function,
+                            (node.start_byte, node.end_byte, in_block))
+    builder.graph.add_node(block)
+    if builder.current_function is not None:
+        builder.graph.add_edge(builder.current_function, block, label="block")
+
+
+def _c_initializer_list(builder, node):
+    if node.parent is not None and node.parent.type == "initializer_list":
+        return
+    name = f"init@{node.start_byte}:{node.end_byte}"
+    init = DeclarationNode(name, "initializer", builder.current_function,
+                           (node.start_byte, node.end_byte))
+    builder.graph.add_node(init)
+    if builder.current_function is not None:
+        builder.graph.add_edge(builder.current_function, init, label="init")
+
+
+def _c_add_expression(builder, node):
+    if node is None or node.type not in _C_EXPR_VALUE_TYPES:
+        return
+    if node.end_byte - node.start_byte < EXPRESSION_MIN_BYTES:
+        return
+    name = f"expr@{node.start_byte}:{node.end_byte}"
+    expr = DeclarationNode(name, "expression", builder.current_function,
+                           (node.start_byte, node.end_byte))
+    builder.graph.add_node(expr)
+    if builder.current_function is not None:
+        builder.graph.add_edge(builder.current_function, expr, label="expr")
+
+
+def _c_assignment_expression(builder, node):
+    if any(c.type == "=" for c in node.children):
+        _c_add_expression(builder, node.child_by_field_name("right"))
+
+
+def _c_init_declarator(builder, node):
+    _c_add_expression(builder, node.child_by_field_name("value"))
+
+
+def _c_return_statement(builder, node):
+    for c in node.children:
+        if c.type not in ("return", ";", "comment"):
+            _c_add_expression(builder, c)
             return
-        name = f"init@{node.start_byte}:{node.end_byte}"
-        init = DeclarationNode(name, "initializer", self.current_function,
-                               (node.start_byte, node.end_byte, "{0}"))
-        self.graph.add_node(init)
-        if self.current_function is not None:
-            self.graph.add_edge(self.current_function, init, label="init")
 
-    EXPR_VALUE_TYPES = ("binary_expression", "call_expression",
-                        "conditional_expression", "parenthesized_expression")
 
-    def _add_expression_node(self, node):
-        # A large arithmetic/logical value collapses to a typed constant in one
-        # call (Perses nibbles it operand by operand). Only WHOLE rvalues are
-        # emitted (assignment RHS / return / init value), so the constant never
-        # lands inside surrounding arithmetic (no new overflow UB).
-        if node is None or node.type not in self.EXPR_VALUE_TYPES:
-            return
-        if node.end_byte - node.start_byte < EXPRESSION_MIN_BYTES:
-            return
-        name = f"expr@{node.start_byte}:{node.end_byte}"
-        expr = DeclarationNode(name, "expression", self.current_function,
-                               (node.start_byte, node.end_byte, "0xDEADBEEF"))
-        self.graph.add_node(expr)
-        if self.current_function is not None:
-            self.graph.add_edge(self.current_function, expr, label="expr")
+def _c_call_expression(builder, node):
+    args = node.child_by_field_name("arguments")
+    if args is None:
+        return
+    for a in args.children:
+        _c_add_expression(builder, a)
 
-    def visit_assignment_expression(self, node):
-        # plain `=` only; collapsing the RHS of `+=`/`*=`/... would inject
-        # arithmetic on the constant and risk overflow UB.
-        if any(c.type == "=" for c in node.children):
-            self._add_expression_node(node.child_by_field_name("right"))
 
-    def visit_init_declarator(self, node):
-        self._add_expression_node(node.child_by_field_name("value"))
+def _c_struct_declaration_name(parent_node):
+    for child in parent_node.children:
+        if child.type == "identifier":
+            return child.text.decode("utf-8")
+        if child.type in ("init_declarator", "pointer_declarator", "array_declarator"):
+            for cc in child.children:
+                if cc.type == "identifier":
+                    return cc.text.decode("utf-8")
 
-    def visit_return_statement(self, node):
-        for c in node.children:
-            if c.type not in ("return", ";", "comment"):
-                self._add_expression_node(c)
-                return
 
-    def visit_call_expression(self, node):
-        # Nested fallback: each call ARGUMENT is also a collapsible rvalue. When
-        # an outer expression can't collapse (the bug is inside it), the probe
-        # then collapses the non-bug argument subtrees; the overlap filter makes
-        # an accepted outer collapse subsume these. Arguments are safe (a
-        # constant passed to a function is a conversion, not arithmetic).
-        args = node.child_by_field_name("arguments")
-        if args is None:
-            return
-        for a in args.children:
-            self._add_expression_node(a)
+def _c_struct_parameter_name(parent_node):
+    function_declarator = parent_node.parent.parent
+    for child in function_declarator.children:
+        if child.type == "identifier":
+            return child.text.decode("utf-8")
 
-    def _handle_struct_declaration_parent(self, parent_node):
-        for child in parent_node.children:
-            if child.type == "identifier":
-                return child.text.decode("utf-8")
-            if child.type in ["init_declarator", "pointer_declarator", "array_declarator"]:
-                for child_child in child.children:
-                    if child_child.type == "identifier":
-                        return child_child.text.decode("utf-8")
 
-    def _handle_struct_parameter_declaration_parent(self, parent_node):
-        function_declarator = parent_node.parent.parent
-        for child in function_declarator.children:
-            if child.type == "identifier":
-                return child.text.decode("utf-8")
+def _c_struct_function_name(parent_node):
+    for child in parent_node.children:
+        if child.type == "function_declarator":
+            for cc in child.children:
+                if cc.type == "identifier":
+                    return cc.text.decode("utf-8")
 
-    def _handle_struct_function_definition_parent(self, parent_node):
-        for child in parent_node.children:
-            if child.type == "function_declarator":
-                for child_child in child.children:
-                    if child_child.type == "identifier":
-                        return child_child.text.decode("utf-8")
 
-    def visit_struct_specifier(self, node):
-        parent_node = node.parent if len(node.children) < 3 else None
-        for child in node.children:
-            if child.type == "type_identifier":
-                struct_name = child.text.decode("utf-8")
-                struct_node = DeclarationNode(struct_name, "struct", None)
-                if struct_name not in self.structs:
-                    self.structs[struct_name] = struct_node
-                    return self.graph.add_node(struct_node)
-                if parent_node is not None:
-                    declaration_name = None
-                    if parent_node.type == "declaration":
-                        declaration_name = self._handle_struct_declaration_parent(parent_node)
-                    elif parent_node.type == "parameter_declaration":
-                        declaration_name = self._handle_struct_parameter_declaration_parent(parent_node)
-                    elif parent_node.type == "function_definition":
-                        declaration_name = self._handle_struct_function_definition_parent(parent_node)
-                    if declaration_name:
-                        if self.declarations.get(declaration_name) is not None:
-                            declaration = self.declarations.get(declaration_name)
-                            self.graph.add_edge(struct_node, declaration, label="struct")
-                    return
+def _c_struct_specifier(builder, node):
+    parent_node = node.parent if len(node.children) < 3 else None
+    for child in node.children:
+        if child.type != "type_identifier":
+            continue
+        struct_name = child.text.decode("utf-8")
+        struct_node = DeclarationNode(struct_name, "struct", None)
+        if struct_name not in builder.structs:
+            builder.structs[struct_name] = struct_node
+            return builder.graph.add_node(struct_node)
+        if parent_node is not None:
+            name = None
+            if parent_node.type == "declaration":
+                name = _c_struct_declaration_name(parent_node)
+            elif parent_node.type == "parameter_declaration":
+                name = _c_struct_parameter_name(parent_node)
+            elif parent_node.type == "function_definition":
+                name = _c_struct_function_name(parent_node)
+            if name and builder.symbols.get(name) is not None:
+                builder.graph.add_edge(struct_node, builder.symbols[name],
+                                       label="struct")
+        return
 
-    def exit_struct_specifier(self, node):
-        pass
 
-    def get_node_visitor(self, node):
-        visitors = {
-            "function_definition": self.visit_function_definition,
-            "declaration": self.visit_declaration,
-            "struct_specifier": self.visit_struct_specifier,
-            "for_statement": self.visit_for_statement,
-            "if_statement": self.visit_if_statement,
-            "initializer_list": self.visit_initializer_list,
-            "assignment_expression": self.visit_assignment_expression,
-            "init_declarator": self.visit_init_declarator,
-            "return_statement": self.visit_return_statement,
-            "call_expression": self.visit_call_expression,
-        }
-        return visitors.get(node.type, self.visit_default)
+C_SCHEMA = LanguageSchema(
+    language="c",
+    custom={
+        "function_definition": _c_function_definition,
+        "declaration": _c_declaration,
+        "struct_specifier": _c_struct_specifier,
+        "for_statement": _c_add_block,
+        "if_statement": _c_add_block,
+        "initializer_list": _c_initializer_list,
+        "assignment_expression": _c_assignment_expression,
+        "init_declarator": _c_init_declarator,
+        "return_statement": _c_return_statement,
+        "call_expression": _c_call_expression,
+    },
+    custom_exit={
+        "function_definition": _c_exit_function_definition,
+    },
+)
 
-    def get_node_exit(self, node):
-        exit_funcs = {
-            "function_definition": self.exit_function_definition,
-            "declaration": self.exit_declaration,
-            "struct_specifier": self.exit_struct_specifier,
-            "for_statement": self.exit_for_statement,
-            "if_statement": self.exit_if_statement,
-        }
-        return exit_funcs.get(node.type, self.exit_default)
+
+# --------------------------------------------------------------------------- #
+# Registry / entry points                                                      #
+# --------------------------------------------------------------------------- #
+
+class SolidityGraphBuilder(GraphBuilder):
+    SCHEMA = SOLIDITY
 
 
 class JavaGraphBuilder(GraphBuilder):
-    LANGUAGE = "java"
+    SCHEMA = JAVA
 
-    def __init__(self):
+
+class CGraphBuilder(GraphBuilder):
+    SCHEMA = C_SCHEMA
+
+    def __init__(self) -> None:
         super().__init__()
-        self.function_counter = 0
-        self.state_variable_counter = 0
-        self.local_variable_counter = 0
-        self.declaration_stack: List[DeclarationNode] = []
-        self.classes: dict = {}
-
-    def visit_default(self, node):
-        pass
-
-    def exit_default(self, node):
-        pass
-
-    def visit_class_declaration(self, node):
-        class_name = ""
-        for n in node.children:
-            if n.type == "identifier":
-                class_name = n.text.decode("utf-8")
-                break
-        class_node = DeclarationNode(class_name, "class", None)
-        self.graph.add_node(class_node)
-        self.push_declaration(class_node)
-        self.classes[class_node.name] = class_node
-
-        for child in node.children:
-            if child.type == "superclass":
-                parent_name = child.text.decode("utf-8").split("extends ")[-1]
-                if parent_name != class_name:
-                    try:
-                        parent_node = self.classes[parent_name]
-                        self.graph.add_edge(parent_node, class_node,
-                                            label="inherits")
-                    except KeyError:
-                        continue
-
-    def exit_scope(self, node):
-        """Pops the declaration pushed on entering a class/interface/method/
-        constructor, so `peek_declaration` always reflects the true enclosing
-        scope (and `parent` chains are correct)."""
-        self.pop_declaration()
-
-    def visit_function_definition(self, node):
-        func_name = None
-        for n in node.children:
-            if n.type == "identifier":
-                func_name = n.text.decode("utf-8")
-                break
-
-        if func_name is None:
-            raise ValueError("Function name not found in node in visit_function_definition")
-        function_args = None
-        for child in node.children:
-            if child.type == "formal_parameters":
-                function_args = child.text.decode("utf-8")
-                break
-
-        parent_node = self.peek_declaration()
-        if node.type == "constructor_declaration":
-            func_node = DeclarationNode(func_name, "constructor", parent_node, function_args)
-        else:
-            func_node = DeclarationNode(func_name, "function", parent_node, function_args)
-        self.graph.add_node(func_node)
-        self.push_declaration(func_node)
-        self.current_function = func_node
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, func_node, label="def")
-
-    def visit_field_declaration(self, node):
-        for child in node.children:
-            if child.type == "variable_declarator":
-                var_name_node = child.child_by_field_name("name")
-                if var_name_node:
-                    field_name = var_name_node.text.decode("utf-8")
-                    parent_node = self.peek_declaration()
-                    field_node = DeclarationNode(field_name, "field", parent_node)
-                    self.graph.add_node(field_node)
-                    if parent_node is not None:
-                        self.graph.add_edge(parent_node, field_node, label="def")
-
-    def visit_local_variable_declaration(self, node):
-
-        parent = self.peek_declaration()
-
-        type_node = node.child_by_field_name("type")
-
-        for decl in node.children:
-            if decl.type == "variable_declarator":
-                name_node = decl.child_by_field_name("name")
-                if not name_node:
-                    continue
-                var_name = name_node.text.decode("utf-8")
-                local_node = DeclarationNode(var_name, "local_variable", parent)
-                self.graph.add_node(local_node)
-                if parent is not None:
-                    self.graph.add_edge(parent, local_node, label="def")
-
-    def exit_function_definition(self, node):
-        self.pop_declaration()
-
-    def visit_event_definition(self, node):
-        event_name = node.text.decode("utf-8")
-        parent_node = self.peek_declaration()
-        event_node = DeclarationNode(event_name, "event", parent_node)
-        self.graph.add_node(event_node)
-        if parent_node is not None:
-            self.graph.add_edge(parent_node, event_node, label='def')
-
-    def get_node_visitor(self, node):
-        visitors = {
-            "class_declaration": self.visit_class_declaration,
-            "interface_declaration": self.visit_class_declaration,
-            "method_declaration": self.visit_function_definition,
-            "event_definition": self.visit_event_definition,
-            "field_declaration": self.visit_field_declaration,
-            "constructor_declaration": self.visit_function_definition,
-            "local_variable_declaration": self.visit_local_variable_declaration,
-        }
-        return visitors.get(node.type, self.visit_default)
-
-    def get_node_exit(self, node):
-        # Pop every scope we pushed on enter, so nesting/parent is correct. The
-        # node types must match the Java grammar (method/class/...), not the
-        # Solidity ones -- keying them wrong leaves the stack growing forever.
-        exit_funcs = {
-            "class_declaration": self.exit_scope,
-            "interface_declaration": self.exit_scope,
-            "method_declaration": self.exit_scope,
-            "constructor_declaration": self.exit_scope,
-        }
-        return exit_funcs.get(node.type, self.exit_default)
+        self.symbols: Dict[str, DeclarationNode] = {}
+        self.structs: Dict[str, DeclarationNode] = {}
 
 
 GRAPH_BUILDERS = {

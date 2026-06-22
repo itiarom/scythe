@@ -25,6 +25,25 @@ class ASTRemoval(parsers.TreeTraversal):
     def remove_nodes(self, nodes_to_remove: set, mode: str) -> str:
         pass
 
+    @classmethod
+    def build_candidate(cls, base_content, graph, removed, mode, table=None):
+        """Candidate source for removing ``removed`` (the per-language rewrite
+        dispatch, moved out of dd.py). ``table`` memoizes the replacement table
+        across calls with the same ``base_content``; returns ``(content, table)``.
+        Slow paths build a fresh instance per call (those methods mutate
+        ``self.content``); fast paths are stateless classmethods."""
+        return cls._slow_candidate(base_content, graph, set(removed), mode), table
+
+    @classmethod
+    def _slow_candidate(cls, base_content, graph, sel, mode):
+        inst = cls(base_content, graph)
+        if mode == "break":
+            return inst.break_inheritance(
+                {n for n in sel if n.node_type == "class"})
+        if mode == "flatten":
+            return inst.flatten_inheritance(sel)
+        return inst.remove_nodes(sel, mode)
+
 
 class SolidityDeclarationRemoval(ASTRemoval):
     LANGUAGE = "solidity"
@@ -177,9 +196,14 @@ class SolidityDeclarationRemoval(ASTRemoval):
                 return
 
     def visit_modifier_invocation(self, node):
+        # A modifier_invocation is also how a derived constructor calls a base
+        # constructor (`function D(...) Base(args)`), so removing a contract must
+        # drop these too -- otherwise the call to the deleted base is left dangling
+        # (undeclared identifier) and the contract can never be removed on its own.
         for child in node.children:
             if child.type == "identifier":
-                if child.text.decode("utf-8") in self.removed_modifiers:
+                name = child.text.decode("utf-8")
+                if name in self.removed_modifiers or name in self.removed_contracts:
                     self._mark(node)
                 return
 
@@ -256,12 +280,32 @@ class SolidityDeclarationRemoval(ASTRemoval):
                         changed = True
                 stack.extend(n.children)
 
+    @classmethod
+    def build_candidate(cls, base_content, graph, removed, mode, table=None):
+        # Solidity's edits are set-dependent (reference/emit/modifier-invocation
+        # removal keyed on the whole removed set, the dead-local fixpoint, struct
+        # placeholder synthesis), so unlike C/Java there is no per-node edit table
+        # to precompute -- every candidate runs the full traversal. The one
+        # reusable artifact is the parse, so memoize it across the pass; flatten/
+        # break keep their own parse via the slow path.
+        sel = set(removed)
+        if mode == "removal":
+            if table is None:
+                table = parsers.get_parser(cls.LANGUAGE).parse(
+                    base_content.encode("utf-8"))
+            return cls(base_content, graph)._remove_with_tree(sel, table), table
+        return cls._slow_candidate(base_content, graph, sel, mode), table
+
     def remove_nodes(self, nodes_to_remove: set, mode: str) -> str:
         if mode not in ["removal"]:
             raise ValueError(f"Unknown mode: {mode}. Must be 'removal'")
+        tree = parsers.get_parser(self.LANGUAGE).parse(
+            self.content.encode("utf-8"))
+        return self._remove_with_tree(nodes_to_remove, tree)
 
-        parser = parsers.get_parser(self.LANGUAGE)
-        tree = parser.parse(self.content.encode("utf-8"))
+    def _remove_with_tree(self, nodes_to_remove, tree):
+        # Removal body, parameterized on an already-parsed tree so build_candidate
+        # can reuse one parse across every candidate in a pass.
         self.nodes_to_remove = nodes_to_remove
         self.removed_nodes = []
         self.removed_ranges = []
@@ -476,6 +520,24 @@ class SolidityDeclarationRemoval(ASTRemoval):
                  if n not in {self._inheritance_base(s) for s in specs}]
         return (start, end, (", ".join(extra)) if extra else "")
 
+    def _base_ctor_call_edits(self, child, base_name):
+        # A derived contract calls its base constructor via `Base(args)` (a
+        # modifier_invocation); when Base is flattened away that call must be
+        # removed too, or it dangles as an undeclared identifier.
+        edits = []
+        stack = list(child.children)
+        while stack:
+            n = stack.pop()
+            if n.type == "modifier_invocation":
+                ident = next((c for c in n.children
+                              if c.type == "identifier"), None)
+                if ident is not None \
+                        and ident.text.decode("utf-8") == base_name:
+                    edits.append((n.start_byte, n.end_byte, ""))
+                    continue
+            stack.extend(n.children)
+        return edits
+
     def flatten_inheritance(self, nodes_to_remove: set) -> str:
         parser = parsers.get_parser(self.LANGUAGE)
         tree = parser.parse(self.content.encode("utf-8"))
@@ -526,6 +588,7 @@ class SolidityDeclarationRemoval(ASTRemoval):
                 clause = self._inheritance_clause_edit(child, base_name, base_parents)
                 if clause is not None:
                     edits.append(clause)
+                edits.extend(self._base_ctor_call_edits(child, base_name))
             edits.append((base.start_byte, base.end_byte, ""))
             flattened = True
 
@@ -1246,6 +1309,35 @@ class CDeclarationRemoval(ASTRemoval):
             prev, cur_end = e, max(cur_end, e)
         out.append(enc[prev:])
         return remove_empty_lines(b"".join(out).decode("utf-8"))
+
+    @classmethod
+    def build_candidate(cls, base_content, graph, removed, mode, table=None):
+        sel = set(removed)
+        if mode == "replacement" and sel and all(
+                n.node_type in ("function", "global_variable") for n in sel):
+            if table is None:
+                table = cls(base_content, graph).replacement_table()
+            return cls.assemble_from_table(base_content, sel, table), table
+        if sel and all(n.node_type in ("for_statement", "if_statement",
+                                       "initializer", "expression") for n in sel):
+            edits = [cls._fragment_edit(n) for n in sel]
+            return cls._splice_edits(base_content, edits), table
+        if sel and all(n.node_type == "struct" for n in sel):
+            return cls(base_content, graph).remove_structs(sel), table
+        return cls._slow_candidate(base_content, graph, sel, mode), table
+
+    @classmethod
+    def _fragment_edit(cls, n):
+        # repl is a property of the fragment kind, not stored in the graph:
+        # collapse an initializer/expression to a constant, delete a block ("" in
+        # a block, ";" for an unbraced control body — args[2] is in_block).
+        if n.node_type == "initializer":
+            repl = "{0}"
+        elif n.node_type == "expression":
+            repl = "0xDEADBEEF"
+        else:
+            repl = "" if n.args[2] else ";"
+        return (n.args[0], n.args[1], repl)
 
     def _c_struct_field_types(self, struct_node):
         out = {}
@@ -2718,6 +2810,17 @@ class JavaDeclarationRemoval(ASTRemoval):
         for s, e, txt in sorted(kept, key=lambda x: x[0], reverse=True):
             source[s:e] = txt.encode("utf-8")
         return source.decode("utf-8")
+
+    @classmethod
+    def build_candidate(cls, base_content, graph, removed, mode, table=None):
+        sel = set(removed)
+        if mode == "replacement" and sel and all(
+                n.node_type in ("function", "field", "local_variable")
+                for n in sel):
+            if table is None:
+                table = cls(base_content, graph).replacement_table()
+            return cls.assemble_from_table(base_content, sel, table), table
+        return cls._slow_candidate(base_content, graph, sel, mode), table
 
 
 AST_REMOVALS = {

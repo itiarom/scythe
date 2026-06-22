@@ -1,267 +1,77 @@
 import argparse
-import time
 import resource
 import sys
+import time
 
 from reducer import utils
+from reducer.checker import PROPERTY_CHECKERS
 from reducer.dd import Interesting, perform_dd, parallel_probe_reduce
-from reducer.checker import PROPERTY_CHECKERS, JavaPropertyChecker
 from reducer.graph import build_graph_from_file
+from reducer.passes import LANGUAGES
 
 resource.setrlimit(resource.RLIMIT_STACK, (2**29, -1))
 sys.setrecursionlimit(10**6)
 
-# Skip tiny C blocks in the block pass — they are cheap for Perses to finish and
-# probing them would only add oracle calls; the win is the big loops/ifs.
-BLOCK_MIN_BYTES = 40
+# example Solidity: scythe --source-file foo.sol  --script run.sh --language solidity
+# example C:        scythe --source-file foo.c    --script run.sh --language c
+# example Java:     scythe --source-file Main.java --script run.sh --language java
 
 
-#example Solidity: scythe --source-file ./Solidity/smart2/ext_changed.sol --script ./Solidity/smart2/solidity2.sh
-#example C: scythe --source-file "./C/gcc-59903/small.c" --script "./C/gcc-59903/test_r.sh" --language c --mode "$mode"
-#example Java: scythe --source-file "./Java/generator_modified/iter_1/Main.java" --script "./Java/generator_modified/iter_1/run.sh" --language java --mode "$mode"
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Semantic-aware program reducer (scythe).")
+    parser.add_argument("--language", default="solidity", choices=list(LANGUAGES),
+                        help="Source language.")
+    parser.add_argument("--source-file", required=True,
+                        help="Source file to minimize (rewritten in place).")
+    parser.add_argument("--script", required=True,
+                        help="Property test script (exit 0 iff the property holds).")
+    return parser.parse_args()
 
-parser = argparse.ArgumentParser(
-    description=('Modify Solidity files based on node removal and '
-                 "Slither analysis, considering specified findings.")
-)
 
-parser.add_argument(
-    "--language",
-    default="solidity",
-    choices=['solidity', 'c', 'java'],
-    help="Select specific language (options: 'solidity', 'c', 'java')"
-)
+def run_to_fixpoint(file_path, sweep):
+    """Run ``sweep`` until it stops shrinking the file."""
+    while True:
+        before = utils.read_file(file_path)
+        sweep()
+        if utils.read_file(file_path) == before:
+            return
 
-parser.add_argument(
-    "--source-file",
-    type=str,
-    default="ext_changed.sol",
-    help="Source file to minimize",
-)
 
-parser.add_argument(
-    '--script',
-    type=str,
-    help='script to run"',
-    default="./solidity2.sh"
-)
+def reduce_program(interesting, file_path, language):
+    """Run the language's pass schedule to a fixpoint. One driver, every
+    language: rebuild the graph, then probe or delta-debug each pass's nodes."""
+    cfg = LANGUAGES[language]
 
-parser.add_argument(
-    "--mode",
-    default="combination",
-    choices=['removal', 'replacement', 'combination', 'break'],
-    help="Select whether the removal of variables should follow a removal, "
-         "replacement or a combination strategy"
-)
-args = parser.parse_args()
+    def sweep():
+        for p in cfg.passes:
+            interesting.graph = build_graph_from_file(file_path, language)
+            interesting.removal_mode = p.mode or cfg.mode
+            interesting.mode = list(p.kinds)
+            node_filter = (
+                lambda n, p=p: n.node_type in p.kinds
+                and (p.where is None or p.where(n)))
+            if p.driver == "probe":
+                parallel_probe_reduce(interesting, node_filter)
+            else:
+                perform_dd(interesting, node_filter, parallel=True)
+
+    run_to_fixpoint(file_path, sweep)
 
 
 def main():
-    start_time = time.time()
-    file_path = args.source_file
-    print(f"Using source file: {file_path}")
+    args = parse_args()
+    start = time.time()
 
-    graph = build_graph_from_file(file_path, args.language)
-    print(f"Graph built from file: {file_path}")
-    print(graph)
+    graph = build_graph_from_file(args.source_file, args.language)
+    checker = PROPERTY_CHECKERS[args.language](args.source_file, args.script)
+    content = utils.read_file(args.source_file)
+    interesting = Interesting(graph, content, checker, args.language,
+                              LANGUAGES[args.language].mode)
 
-    print(args.script)
-    print(file_path)
-    prop_checker = PROPERTY_CHECKERS[args.language](file_path, args.script)
-    content = utils.read_file(file_path)
+    reduce_program(interesting, args.source_file, args.language)
 
-    interesting = Interesting(graph, content,
-                              prop_checker, args.language, args.mode)
-
-    passes = [
-        ["function", "modifier", "event"],
-        ["contract", "struct"],
-        ["state_var"],
-        ["contract", "struct"],
-        ["var"]
-    ]
-    parallel = True
-
-    if args.language == "c":
-        parallel = True
-        passes = [
-            ["function"],
-            ["global_variable"],
-            ["struct"],
-            ["for_statement", "if_statement"],
-            ["initializer"],
-            ["expression"],
-        ]
-        if args.mode not in ["removal", "replacement", "combination"]:
-            raise ValueError(
-                f"Unknown mode: {args.mode}. Must be 'removal', 'replacement', "
-                f"or 'combination'."
-            )
-    elif args.language == "java":
-        parallel = False
-        if args.mode == "replacement":
-            passes = []
-        else:
-            passes = ["class"]
-            interesting.removal_mode = "break"
-    else:
-        if args.mode not in ["removal"]:
-            raise ValueError(f"Unknown mode: {args.mode}. Must be 'removal'")
-
-        interesting.removal_mode = "flatten"
-        interesting.mode = ["contract"]
-        perform_dd(interesting, lambda n: n.node_type == "contract",
-                   parallel=parallel, language=args.language)
-        interesting.removal_mode = "removal"
-        graph = build_graph_from_file(file_path, args.language)
-        interesting.graph = graph
-
-    fixed_point = False
-    while not fixed_point:
-        before = utils.read_file(file_path)
-        for pass_ in passes:
-            if args.language in ("java", "solidity", "c"):
-                graph = build_graph_from_file(file_path, args.language)
-                interesting.graph = graph
-
-            interesting.mode = pass_
-            if args.language == "c" and pass_ == ["function"]:
-                parallel_probe_reduce(
-                    interesting,
-                    lambda n: n.node_type == "function" and n.name != "main")
-            elif args.language == "c" and pass_ == ["global_variable"]:
-                parallel_probe_reduce(
-                    interesting, lambda n: n.node_type == "global_variable")
-            elif args.language == "c" and pass_ == ["initializer"]:
-                parallel_probe_reduce(
-                    interesting,
-                    lambda n: n.node_type == "initializer"
-                    and (n.args[1] - n.args[0]) >= BLOCK_MIN_BYTES)
-            elif args.language == "c" and pass_ == ["for_statement",
-                                                    "if_statement"]:
-                parallel_probe_reduce(
-                    interesting,
-                    lambda n: n.node_type in ("for_statement", "if_statement")
-                    and (n.args[1] - n.args[0]) >= BLOCK_MIN_BYTES)
-            elif args.language == "c" and pass_ == ["expression"]:
-                parallel_probe_reduce(
-                    interesting,
-                    lambda n: n.node_type == "expression"
-                    and (n.args[1] - n.args[0]) >= BLOCK_MIN_BYTES)
-            elif args.language == "c" and pass_ == ["struct"]:
-                perform_dd(interesting,
-                           lambda n: n.node_type == "struct" and n.name != "__A",
-                           parallel=parallel, language=args.language)
-            else:
-                perform_dd(interesting, lambda n: n.node_type in pass_,
-                           parallel=parallel, language=args.language)
-        fixed_point = (args.language not in ("solidity", "c")
-                       or utils.read_file(file_path) == before)
-
-    if args.language == "java":
-        graph = build_graph_from_file(file_path, args.language)
-        interesting.graph = graph
-
-        fixed_point_reached = False
-        if args.mode == "combination":
-            passes = [["function"], ["field"], ["local_variable"]]
-            interesting.removal_mode = "replacement"
-
-            counter = 0
-
-            while not fixed_point_reached:
-                old = utils.read_file(file_path)
-                for pass_ in passes:
-                    graph = build_graph_from_file(file_path, args.language)
-
-                    interesting.graph = graph
-                    interesting.mode = pass_
-                    perform_dd(interesting, lambda n: n.node_type in pass_, parallel=False)
-
-                new = utils.read_file(file_path)
-                fixed_point_reached = (old == new)
-                counter += 1
-            passes = [
-                ["local_variable"],
-                ["function"],
-                ["constructor"],
-                ["field"],
-                ["class"],
-                ["local_variable", "function", "field"]
-
-            ]
-            fixed_point_reached = False
-            remove_iteration_counter = 0
-
-            while not fixed_point_reached:
-                remove_iteration_counter += 1
-                old_content = utils.read_file(file_path)
-                for pass_ in passes:
-                    graph = build_graph_from_file(file_path, args.language)
-                    prop_checker = JavaPropertyChecker(file_path, args.script)
-                    content = utils.read_file(file_path)
-                    interesting = Interesting(graph, content,
-                                              prop_checker,
-                                              args.language, "removal")
-                    interesting.mode = pass_
-                    perform_dd(interesting, lambda n: n.node_type in pass_,
-                               parallel=False)
-
-                new_content = utils.read_file(file_path)
-                if old_content == new_content:
-                    fixed_point_reached = True
-        elif args.mode == "removal":
-            passes = [
-                ["local_variable"],
-                ["function"],
-                ["constructor"],
-                ["field"],
-                ["class"],
-            ]
-            fixed_point_reached = False
-            interesting.removal_mode = "removal"
-            remove_iteration_counter = 0
-
-            while not fixed_point_reached:
-                remove_iteration_counter += 1
-                old_content = utils.read_file(file_path)
-                for pass_ in passes:
-                    graph = build_graph_from_file(file_path, args.language)
-                    prop_checker = JavaPropertyChecker(file_path, args.script)
-                    content = utils.read_file(file_path)
-                    interesting = Interesting(graph, content,
-                                              prop_checker, args.language, "removal")
-                    interesting.mode = pass_
-                    perform_dd(interesting, lambda n: n.node_type in pass_,
-                               parallel=False)
-                new_content = utils.read_file(file_path)
-                if old_content == new_content:
-                    fixed_point_reached = True
-        elif args.mode == "replacement":
-            passes = [["function"], ["field"], ["class"], ["local_variable"]]
-            fixed_point_reached = False
-            while not fixed_point_reached:
-                old = utils.read_file(file_path)
-
-                graph = build_graph_from_file(file_path, args.language)
-                interesting.graph = graph
-                interesting.removal_mode = "flatten"
-                interesting.mode = ["class"]
-                perform_dd(interesting, lambda n: n.node_type == "class",
-                           parallel=True)
-
-                interesting.removal_mode = "replacement"
-                for pass_ in passes:
-                    graph = build_graph_from_file(file_path, args.language)
-                    interesting.graph = graph
-                    interesting.mode = pass_
-                    perform_dd(interesting, lambda n: n.node_type in pass_,
-                               parallel=True)
-                fixed_point_reached = (utils.read_file(file_path) == old)
-
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    print(f"Execution time: {elapsed_time} seconds")
+    print(f"Execution time: {time.time() - start} seconds")
 
 
 if __name__ == "__main__":

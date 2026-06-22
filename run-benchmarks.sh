@@ -89,9 +89,9 @@ fi
 
 # ---- per-language configuration ---------------------------------------------
 case "$LANGUAGE" in
-    solidity) BASE_DIR="Solidity"; EXT="sol";  BENCH_GLOB="smart*"; SCYTHE_MODE="removal" ;;
-    java)     BASE_DIR="Java";     EXT="java"; BENCH_GLOB="*";      SCYTHE_MODE="replacement" ;;
-    c)        BASE_DIR="C";        EXT="c";    BENCH_GLOB="*";      SCYTHE_MODE="replacement" ;;
+    solidity) BASE_DIR="Solidity"; EXT="sol";  BENCH_GLOB="smart*" ;;
+    java)     BASE_DIR="Java";     EXT="java"; BENCH_GLOB="*" ;;
+    c)        BASE_DIR="C";        EXT="c";    BENCH_GLOB="*" ;;
     *) echo "Error: --language must be 'solidity', 'java', or 'c' (got '$LANGUAGE')." >&2; exit 1 ;;
 esac
 
@@ -269,7 +269,7 @@ run_scythe() {
         work="$(mktemp -d)"
         ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" \
             "$SCYTHE" --source-file "$src" --script "$test" \
-                       --language java --mode "$SCYTHE_MODE" ) >/dev/null 2>&1
+                       --language java ) >/dev/null 2>&1
         rm -rf "$work"
     elif [[ "$LANGUAGE" == "c" ]]; then
         # The C oracles assume the candidate sits in $(pwd) (they bind-mount it
@@ -279,12 +279,11 @@ run_scythe() {
         work="$(mktemp -d)"
         cp "$src" "$work/program.c"
         ( cd "$work" && "$SCYTHE" --source-file program.c --script "$test" \
-                       --language c --mode "$SCYTHE_MODE" ) >/dev/null 2>&1
+                       --language c ) >/dev/null 2>&1
         cp "$work/program.c" "$src"
         rm -rf "$work"
     else
-        "$SCYTHE" --source-file "$src" --script "$test" \
-                   --mode "$SCYTHE_MODE" >/dev/null 2>&1
+        "$SCYTHE" --source-file "$src" --script "$test" >/dev/null 2>&1
     fi
     end=$(date +%s)
     echo $((end - start))
