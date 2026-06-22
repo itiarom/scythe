@@ -28,8 +28,6 @@ class CPropertyChecker():
         self.test_script = os.path.abspath(test_script)
 
     def run_test_script(self, file_path: str, cwd: str = None) -> int:
-        print(self.test_script)
-        print(file_path)
         command = ["bash", self.test_script, file_path or self.file_path]
         try:
             while True:

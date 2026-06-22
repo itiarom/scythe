@@ -3,6 +3,10 @@ from typing import NamedTuple, List, Any, Optional
 
 from reducer import parsers
 
+# Only track BIG arithmetic/logical expressions as collapse candidates — small
+# subexpressions are cheap for Perses and probing them is wasted oracle calls.
+EXPRESSION_MIN_BYTES = 40
+
 
 class DeclarationNode(NamedTuple):
     name: str
@@ -266,12 +270,17 @@ class CGraphBuilder(GraphBuilder):
                 global_variable = True
                 break
         if global_variable:
+            # A `static` declaration whose declarator is a function_declarator is
+            # a prototype, not a data global; its name collides with the function
+            # so don't emit it as a removable global_variable node.
+            if any(c.type == "function_declarator" for c in node.children):
+                return
             for child in node.children:
                 if child.type == "identifier":
                     var_name = child.text.decode("utf-8")
                     self.add_global_variable(var_name)
                 elif child.type in [
-                    "init_declarator", "array_declarator", "function_declarator"
+                    "init_declarator", "array_declarator"
                 ]:
                     for child_child in child.children:
                         if child_child.type == "identifier":
@@ -281,21 +290,91 @@ class CGraphBuilder(GraphBuilder):
     def exit_declaration(self, node):
         pass
 
+    def _add_block_node(self, node):
+        # Identity = the block's byte range in the CURRENT source (args), not a
+        # line number; the probe rebuilds the graph each round so offsets stay
+        # fresh. repl = "" when the block sits in a real block, else ";" so
+        # deleting an unbraced control body leaves a valid empty statement.
+        repl = "" if (node.parent is not None and node.parent.type in (
+            "compound_statement", "translation_unit", "declaration_list")
+        ) else ";"
+        name = f"{node.type}@{node.start_byte}:{node.end_byte}"
+        block = DeclarationNode(name, node.type, self.current_function,
+                                (node.start_byte, node.end_byte, repl))
+        self.graph.add_node(block)
+        if self.current_function is not None:
+            self.graph.add_edge(self.current_function, block, label="block")
+
     def visit_for_statement(self, node):
-        for_name = "for_" + str(node.start_point[0])
-        for_node = DeclarationNode(for_name, "for_statement", None)
-        self.graph.add_node(for_node)
+        self._add_block_node(node)
 
     def exit_for_statement(self, node):
         pass
 
     def visit_if_statement(self, node):
-        if_name = "if_" + str(node.start_point[0])
-        if_node = DeclarationNode(if_name, "if_statement", None)
-        self.graph.add_node(if_node)
+        self._add_block_node(node)
 
     def exit_if_statement(self, node):
         pass
+
+    def visit_initializer_list(self, node):
+        # Value simplification: an aggregate initializer `{...}` collapses to
+        # `{0}` in one shot (Perses reduces it element by element). Only the
+        # OUTERMOST list is a node; collapsing it subsumes any nested lists.
+        if node.parent is not None and node.parent.type == "initializer_list":
+            return
+        name = f"init@{node.start_byte}:{node.end_byte}"
+        init = DeclarationNode(name, "initializer", self.current_function,
+                               (node.start_byte, node.end_byte, "{0}"))
+        self.graph.add_node(init)
+        if self.current_function is not None:
+            self.graph.add_edge(self.current_function, init, label="init")
+
+    EXPR_VALUE_TYPES = ("binary_expression", "call_expression",
+                        "conditional_expression", "parenthesized_expression")
+
+    def _add_expression_node(self, node):
+        # A large arithmetic/logical value collapses to a typed constant in one
+        # call (Perses nibbles it operand by operand). Only WHOLE rvalues are
+        # emitted (assignment RHS / return / init value), so the constant never
+        # lands inside surrounding arithmetic (no new overflow UB).
+        if node is None or node.type not in self.EXPR_VALUE_TYPES:
+            return
+        if node.end_byte - node.start_byte < EXPRESSION_MIN_BYTES:
+            return
+        name = f"expr@{node.start_byte}:{node.end_byte}"
+        expr = DeclarationNode(name, "expression", self.current_function,
+                               (node.start_byte, node.end_byte, "0xDEADBEEF"))
+        self.graph.add_node(expr)
+        if self.current_function is not None:
+            self.graph.add_edge(self.current_function, expr, label="expr")
+
+    def visit_assignment_expression(self, node):
+        # plain `=` only; collapsing the RHS of `+=`/`*=`/... would inject
+        # arithmetic on the constant and risk overflow UB.
+        if any(c.type == "=" for c in node.children):
+            self._add_expression_node(node.child_by_field_name("right"))
+
+    def visit_init_declarator(self, node):
+        self._add_expression_node(node.child_by_field_name("value"))
+
+    def visit_return_statement(self, node):
+        for c in node.children:
+            if c.type not in ("return", ";", "comment"):
+                self._add_expression_node(c)
+                return
+
+    def visit_call_expression(self, node):
+        # Nested fallback: each call ARGUMENT is also a collapsible rvalue. When
+        # an outer expression can't collapse (the bug is inside it), the probe
+        # then collapses the non-bug argument subtrees; the overlap filter makes
+        # an accepted outer collapse subsume these. Arguments are safe (a
+        # constant passed to a function is a conversion, not arithmetic).
+        args = node.child_by_field_name("arguments")
+        if args is None:
+            return
+        for a in args.children:
+            self._add_expression_node(a)
 
     def _handle_struct_declaration_parent(self, parent_node):
         for child in parent_node.children:
@@ -352,6 +431,11 @@ class CGraphBuilder(GraphBuilder):
             "struct_specifier": self.visit_struct_specifier,
             "for_statement": self.visit_for_statement,
             "if_statement": self.visit_if_statement,
+            "initializer_list": self.visit_initializer_list,
+            "assignment_expression": self.visit_assignment_expression,
+            "init_declarator": self.visit_init_declarator,
+            "return_statement": self.visit_return_statement,
+            "call_expression": self.visit_call_expression,
         }
         return visitors.get(node.type, self.visit_default)
 

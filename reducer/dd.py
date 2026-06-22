@@ -6,12 +6,16 @@ import hashlib
 import tempfile
 import threading
 import traceback
+import concurrent.futures as cf
 
 import networkx as nx
 import picire
 
 from reducer import utils
+from reducer.graph import build_graph_from_file
 from reducer.modifications import AST_REMOVALS
+
+PROBE_WORKERS = min(12, max(2, (os.cpu_count() or 4) - 2))
 
 
 class Interesting():
@@ -96,6 +100,31 @@ class Interesting():
                 self._repl_src = self.base_content
             return cls.assemble_from_table(
                 self.base_content, sel, self._repl_table)
+        if self.language == "c" and mode == "replacement" and sel \
+                and all(n.node_type in ("function", "global_variable")
+                        for n in sel):
+            cls = AST_REMOVALS[self.language]
+            if self._repl_src is not self.base_content:
+                self._repl_table = cls(self.base_content,
+                                       self.graph).replacement_table()
+                self._repl_src = self.base_content
+            return cls.assemble_from_table(
+                self.base_content, sel, self._repl_table)
+        if self.language == "c" and sel \
+                and all(n.node_type in ("for_statement", "if_statement",
+                                        "initializer", "expression")
+                        for n in sel):
+            # Byte-range rewrite: the node's identity carries (start, end, repl)
+            # — "" / ";" for a removed block, "{0}" for a collapsed initializer,
+            # "0xDEADBEEF" for a collapsed expression — so the candidate is a
+            # direct splice of base_content.
+            edits = [(n.args[0], n.args[1], n.args[2]) for n in sel]
+            return AST_REMOVALS[self.language]._splice_edits(
+                self.base_content, edits)
+        if self.language == "c" and sel \
+                and all(n.node_type == "struct" for n in sel):
+            cls = AST_REMOVALS[self.language]
+            return cls(self.base_content, self.graph).remove_structs(sel)
         ast_removal = AST_REMOVALS[self.language](self.base_content, self.graph)
         if mode == "break":
             return ast_removal.break_inheritance(
@@ -267,4 +296,106 @@ def perform_dd(
         [f for f in nodes if f not in output_nodes],
         remove_contracts=True,
     )
+    interesting.reset_state()
+
+
+def _node_range(n):
+    a = n.args
+    if isinstance(a, tuple) and len(a) >= 2 \
+            and isinstance(a[0], int) and isinstance(a[1], int):
+        return (a[0], a[1])
+    return None
+
+
+def _coarse_probe(interesting, nodes, mode):
+    # Coarse-first probe for containment-structured candidates (blocks /
+    # expressions): try the HUGE outermost ones first. An accepted collapse
+    # subsumes everything nested in it, so its children are never probed; a
+    # rejected one is descended into (probe its direct children) — which both
+    # prunes wasted probes and provides the inner-expression fallback. For flat
+    # candidates (functions/globals have no byte range) every node is outermost,
+    # so this is one parallel level == the old flat probe.
+    ranges = {n: _node_range(n) for n in nodes}
+
+    def contains(a, b):
+        ra, rb = ranges[a], ranges[b]
+        return (ra is not None and rb is not None and a is not b
+                and ra[0] <= rb[0] and rb[1] <= ra[1] and ra != rb)
+
+    def children(node):
+        inside = [c for c in nodes if contains(node, c)]
+        return [c for c in inside
+                if not any(contains(o, c) for o in inside if o is not c)]
+
+    def key(n):
+        return (ranges[n] or (0, 0), n.name or "")
+
+    def holds(n):
+        return interesting._oracle(
+            interesting._build_candidate({n}, mode)) == 0
+
+    frontier = sorted((c for c in nodes
+                       if not any(contains(o, c) for o in nodes)), key=key)
+    removable = []
+    while frontier:
+        with cf.ThreadPoolExecutor(max_workers=PROBE_WORKERS) as ex:
+            verdicts = list(ex.map(holds, frontier))
+        nxt = set()
+        for n, ok in zip(frontier, verdicts):
+            if ok:
+                removable.append(n)
+            else:
+                nxt.update(children(n))
+        frontier = sorted(nxt, key=key)
+    return removable
+
+
+def _commit_max(interesting, removable, mode):
+    # Largest jointly-removable subset; whole union is 1 oracle call when it
+    # holds, else a divide-and-conquer search keeps the invariant that removing
+    # base+R is oracle-valid, so every committed program is validated.
+    def holds(subset):
+        return interesting._oracle(
+            interesting._build_candidate(set(subset), mode)) == 0
+
+    def find(base, cands):
+        if holds(base + cands):
+            return cands
+        if len(cands) == 1:
+            return []
+        mid = len(cands) // 2
+        left = find(base, cands[:mid])
+        right = find(base + left, cands[mid:])
+        return left + right
+
+    to_remove = find([], list(removable))
+    return interesting._build_candidate(set(to_remove), mode) if to_remove \
+        else None
+
+
+def parallel_probe_reduce(interesting, node_filter):
+    # Fixpoint replacement for ddmin: each round coarse-first-probes candidates
+    # from a frozen snapshot (huge/outermost first; accepted collapses subsume
+    # their nested candidates, rejected ones are descended into), commits the
+    # largest jointly-removable subset, and repeats so cascades are caught.
+    # O(n) probes/round (vs ddmin's ~O(n^2)) and parallel within each level.
+    mode = interesting.removal_mode
+    fp = interesting.prop_checker.file_path
+    while True:
+        interesting.graph = build_graph_from_file(fp, interesting.language)
+        interesting.base_content = interesting.content
+        interesting.reset_state()
+        nodes = sorted((n for n in interesting.graph.nodes() if node_filter(n)),
+                       key=lambda n: n.name or "")
+        if not nodes:
+            break
+        interesting._build_candidate({nodes[0]}, mode)  # warm the edit table
+        removable = _coarse_probe(interesting, nodes, mode)
+        if not removable:
+            break
+        committed = _commit_max(interesting, removable, mode)
+        if committed is None or committed == interesting.base_content:
+            break
+        interesting.content = committed
+        utils.update_file(fp, committed)
     interesting.reset_state()

@@ -4,12 +4,16 @@ import resource
 import sys
 
 from reducer import utils
-from reducer.dd import Interesting, perform_dd
+from reducer.dd import Interesting, perform_dd, parallel_probe_reduce
 from reducer.checker import PROPERTY_CHECKERS, JavaPropertyChecker
 from reducer.graph import build_graph_from_file
 
 resource.setrlimit(resource.RLIMIT_STACK, (2**29, -1))
 sys.setrecursionlimit(10**6)
+
+# Skip tiny C blocks in the block pass — they are cheap for Perses to finish and
+# probing them would only add oracle calls; the win is the big loops/ifs.
+BLOCK_MIN_BYTES = 40
 
 
 #example Solidity: scythe --source-file ./Solidity/smart2/ext_changed.sol --script ./Solidity/smart2/solidity2.sh
@@ -82,7 +86,11 @@ def main():
         parallel = True
         passes = [
             ["function"],
-            ["global_variable", "struct"],
+            ["global_variable"],
+            ["struct"],
+            ["for_statement", "if_statement"],
+            ["initializer"],
+            ["expression"],
         ]
         if args.mode not in ["removal", "replacement", "combination"]:
             raise ValueError(
@@ -117,8 +125,36 @@ def main():
                 interesting.graph = graph
 
             interesting.mode = pass_
-            perform_dd(interesting, lambda n: n.node_type in pass_,
-                       parallel=parallel, language=args.language)
+            if args.language == "c" and pass_ == ["function"]:
+                parallel_probe_reduce(
+                    interesting,
+                    lambda n: n.node_type == "function" and n.name != "main")
+            elif args.language == "c" and pass_ == ["global_variable"]:
+                parallel_probe_reduce(
+                    interesting, lambda n: n.node_type == "global_variable")
+            elif args.language == "c" and pass_ == ["initializer"]:
+                parallel_probe_reduce(
+                    interesting,
+                    lambda n: n.node_type == "initializer"
+                    and (n.args[1] - n.args[0]) >= BLOCK_MIN_BYTES)
+            elif args.language == "c" and pass_ == ["for_statement",
+                                                    "if_statement"]:
+                parallel_probe_reduce(
+                    interesting,
+                    lambda n: n.node_type in ("for_statement", "if_statement")
+                    and (n.args[1] - n.args[0]) >= BLOCK_MIN_BYTES)
+            elif args.language == "c" and pass_ == ["expression"]:
+                parallel_probe_reduce(
+                    interesting,
+                    lambda n: n.node_type == "expression"
+                    and (n.args[1] - n.args[0]) >= BLOCK_MIN_BYTES)
+            elif args.language == "c" and pass_ == ["struct"]:
+                perform_dd(interesting,
+                           lambda n: n.node_type == "struct" and n.name != "__A",
+                           parallel=parallel, language=args.language)
+            else:
+                perform_dd(interesting, lambda n: n.node_type in pass_,
+                           parallel=parallel, language=args.language)
         fixed_point = (args.language not in ("solidity", "c")
                        or utils.read_file(file_path) == before)
 

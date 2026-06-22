@@ -540,14 +540,7 @@ class SolidityDeclarationRemoval(ASTRemoval):
 class CDeclarationRemoval(ASTRemoval):
     LANGUAGE = "c"
 
-    def __init__(self, content, graph):
-        super().__init__(content, graph)
-        self.removed_nodes = []
-        self.removed_declarations = []
-        self.goto_statements = []
-        self.replaced_assignment_declarations = []
-        self.removed_nodes_with_types = {}
-        self.constant_values = {
+    CONSTANT_VALUES = {
             'int': '0xDEADBEEF',
             'short': '0xDEAD',
             'long': '0xDEADBEEFDEADBEEF',
@@ -592,6 +585,15 @@ class CDeclarationRemoval(ASTRemoval):
 
             'array': 'array[31000]',
 }
+
+    def __init__(self, content, graph):
+        super().__init__(content, graph)
+        self.removed_nodes = []
+        self.removed_declarations = []
+        self.goto_statements = []
+        self.replaced_assignment_declarations = []
+        self.removed_nodes_with_types = {}
+        self.constant_values = self.CONSTANT_VALUES
 
     def visit_default(self, node):
         pass
@@ -1031,6 +1033,381 @@ class CDeclarationRemoval(ASTRemoval):
             })
 
 
+    @classmethod
+    def _const(cls, typ):
+        if typ is None:
+            return "NULL"
+        return cls.CONSTANT_VALUES.get(typ.strip(), "0")
+
+    def _c_find_ancestor(self, node, typ):
+        cur = node.parent
+        while cur is not None:
+            if cur.type == typ:
+                return cur
+            cur = cur.parent
+        return None
+
+    def _c_enclosing_statement(self, node):
+        cur = node
+        while cur is not None:
+            if cur.type.endswith("statement") or cur.type == "declaration":
+                return cur
+            cur = cur.parent
+        return node
+
+    def _c_use_kind(self, node):
+        if self._c_find_ancestor(node, "update_expression") is not None:
+            return "write"
+        asg = self._c_find_ancestor(node, "assignment_expression")
+        if asg is not None:
+            left = asg.child_by_field_name("left") or (
+                asg.children[0] if asg.children else None)
+            if left is not None and \
+                    left.start_byte <= node.start_byte \
+                    and node.end_byte <= left.end_byte:
+                return "write"
+        return "read"
+
+    def _c_type_text(self, node):
+        for c in node.children:
+            if c.type in ("function_declarator", "init_declarator",
+                          "array_declarator", "pointer_declarator", ";"):
+                break
+            if c.type in ("primitive_type", "sized_type_specifier",
+                          "type_identifier", "struct_specifier",
+                          "union_specifier", "enum_specifier"):
+                return c.text.decode("utf-8")
+        return None
+
+    def _c_func_name(self, defn):
+        for c in defn.children:
+            if c.type != "function_declarator":
+                continue
+            for cc in c.children:
+                if cc.type == "identifier":
+                    return cc.text.decode("utf-8")
+                if cc.type == "parenthesized_declarator":
+                    for x in cc.children:
+                        if x.type == "identifier":
+                            return x.text.decode("utf-8")
+        return None
+
+    def _c_declared_names(self, decl):
+        names = []
+
+        def walk(n):
+            for c in n.children:
+                if c.type == "identifier":
+                    names.append(c.text.decode("utf-8"))
+                elif c.type in ("init_declarator", "array_declarator",
+                                "pointer_declarator", "function_declarator"):
+                    walk(c)
+        walk(decl)
+        return names
+
+    def _c_callee_node(self, call):
+        n = call.child_by_field_name("function")
+        while n is not None and n.type == "parenthesized_expression":
+            inner = [c for c in n.children if c.type not in ("(", ")")]
+            n = inner[0] if inner else None
+        return n if (n is not None and n.type == "identifier") else None
+
+    def _c_delete_text(self, stmt):
+        # Deleting a statement that is the sole (unbraced) body of a control
+        # structure would leave a dangling `if (..)`/`for (..)`; an empty
+        # statement is valid there, so only delete to nothing inside a block.
+        p = stmt.parent
+        if p is not None and p.type in (
+                "compound_statement", "translation_unit", "declaration_list"):
+            return ""
+        return ";"
+
+    def _c_is_prototype(self, decl):
+        stack = list(decl.children)
+        while stack:
+            c = stack.pop()
+            if c.type == "function_declarator":
+                return True
+            if c.type in ("pointer_declarator", "init_declarator",
+                          "array_declarator", "parenthesized_declarator"):
+                stack.extend(c.children)
+        return False
+
+    def replacement_table(self):
+        root = parsers.get_parser(self.LANGUAGE).parse(
+            self.content.encode("utf-8")).root_node
+        func_decls, global_decls = {}, {}
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type == "function_definition":
+                name = self._c_func_name(n)
+                if name is None:
+                    continue
+                rtype = self._c_type_text(n)
+                if name == "main":
+                    body = n.child_by_field_name("body")
+                    spans = ([(c.start_byte, c.end_byte) for c in body.children
+                              if c.type not in ("{", "}")]
+                             if body is not None else [])
+                else:
+                    spans = [(n.start_byte, n.end_byte)]
+                func_decls.setdefault(name, []).append((rtype, spans))
+            elif n.type == "declaration":
+                if not any(c.type == "storage_class_specifier"
+                           and c.text.decode("utf-8") == "static"
+                           for c in n.children):
+                    continue
+                if self._c_is_prototype(n):
+                    continue
+                typ = self._c_type_text(n)
+                for nm in self._c_declared_names(n):
+                    global_decls.setdefault(nm, []).append(
+                        (typ, (n.start_byte, n.end_byte)))
+
+        # A name that is both a function and a "global" is a function (e.g. a
+        # static prototype slipped through); never rewrite its uses as a value.
+        global_names = set(global_decls) - set(func_decls)
+        func_use, value_use, callee_ids = {}, {}, set()
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type == "call_expression":
+                callee = self._c_callee_node(n)
+                if callee is not None:
+                    callee_ids.add(callee.id)
+                    name = callee.text.decode("utf-8")
+                    p = n.parent
+                    if p is not None and p.type == "expression_statement":
+                        func_use.setdefault(name, []).append(
+                            (p.start_byte, p.end_byte, self._c_delete_text(p)))
+                    else:
+                        func_use.setdefault(name, []).append(
+                            (n.start_byte, n.end_byte, None))
+            elif n.type == "identifier":
+                if n.id in callee_ids:
+                    continue
+                name = n.text.decode("utf-8")
+                if name not in global_names:
+                    continue
+                if self._c_use_kind(n) == "write":
+                    st = self._c_enclosing_statement(n)
+                    value_use.setdefault(name, []).append(
+                        (st.start_byte, st.end_byte, self._c_delete_text(st)))
+                else:
+                    value_use.setdefault(name, []).append(
+                        (n.start_byte, n.end_byte, None))
+        return {"func_decls": func_decls, "global_decls": global_decls,
+                "func_use": func_use, "value_use": value_use}
+
+    @classmethod
+    def assemble_from_table(cls, content, sel, table):
+        func_types, value_types, edits = {}, {}, []
+        for nd in sel:
+            if nd.node_type == "function":
+                entries = table["func_decls"].get(nd.name, [])
+                if not entries:
+                    continue
+                func_types[nd.name] = entries[-1][0]
+                for (_, spans) in entries:
+                    edits.extend((s, e, "") for (s, e) in spans)
+            elif nd.node_type == "global_variable":
+                entries = table["global_decls"].get(nd.name, [])
+                if not entries:
+                    continue
+                value_types[nd.name] = entries[-1][0]
+                edits.extend((s, e, "") for (_, (s, e)) in entries)
+        for name, typ in func_types.items():
+            for (s, e, repl) in table["func_use"].get(name, []):
+                edits.append((s, e, cls._const(typ) if repl is None else repl))
+        for name, typ in value_types.items():
+            for (s, e, repl) in table["value_use"].get(name, []):
+                edits.append((s, e, cls._const(typ) if repl is None else repl))
+        return cls._splice_edits(content, edits)
+
+    @classmethod
+    def _splice_edits(cls, content, edits):
+        if not edits:
+            return remove_empty_lines(content)
+        uniq = {}
+        for s, e, txt in edits:
+            uniq.setdefault((s, e), txt)
+        enc = content.encode("utf-8")
+        out, prev, cur_end = [], 0, -1
+        for (s, e) in sorted(uniq, key=lambda se: (se[0], -se[1])):
+            if s < cur_end and e <= cur_end:
+                continue
+            out.append(enc[prev:s])
+            txt = uniq[(s, e)]
+            if txt:
+                out.append(txt.encode("utf-8"))
+            prev, cur_end = e, max(cur_end, e)
+        out.append(enc[prev:])
+        return remove_empty_lines(b"".join(out).decode("utf-8"))
+
+    def _c_struct_field_types(self, struct_node):
+        out = {}
+        for fl in struct_node.children:
+            if fl.type != "field_declaration_list":
+                continue
+            for fd in fl.children:
+                if fd.type != "field_declaration":
+                    continue
+                ftype = self._c_type_text(fd)
+                stack = list(fd.children)
+                while stack:
+                    n = stack.pop()
+                    if n.type == "field_identifier":
+                        out[n.text.decode("utf-8")] = ftype
+                    elif n.type in ("array_declarator", "pointer_declarator"):
+                        stack.extend(n.children)
+        return out
+
+    def _c_struct_type_of(self, decl, names):
+        for c in decl.children:
+            if c.type == "struct_specifier":
+                ti = [x for x in c.children if x.type == "type_identifier"]
+                if ti and ti[0].text.decode("utf-8") in names:
+                    return ti[0].text.decode("utf-8")
+        return None
+
+    def _c_leftmost_id(self, node):
+        n = node
+        while n is not None:
+            if n.type == "identifier":
+                return n.text.decode("utf-8")
+            nxt = n.child_by_field_name("argument") \
+                or n.child_by_field_name("declarator")
+            if nxt is None:
+                kids = [c for c in n.children if c.type not in (
+                    "(", ")", "[", "]", "*", ".", "->")]
+                nxt = kids[0] if kids else None
+            if nxt is None or nxt is n:
+                return None
+            n = nxt
+        return None
+
+    def _c_is_assign_target(self, node):
+        # True iff `node` is the lvalue being written: an ++/-- operand, or on the
+        # lvalue spine of an assignment's left (x.f in `x.f=e`, or x.f in
+        # `x.f[i]=e`) — but NOT an index/operand inside the LHS (the x.f in
+        # `a[x.f]=e` is a READ).
+        p = node.parent
+        if p is not None and p.type == "update_expression":
+            return True
+        asg = self._c_find_ancestor(node, "assignment_expression")
+        if asg is None:
+            return False
+        cur, seen = asg.child_by_field_name("left"), 0
+        while cur is not None and seen < 32:
+            seen += 1
+            if cur.start_byte == node.start_byte \
+                    and cur.end_byte == node.end_byte:
+                return True
+            if cur.type in ("field_expression", "subscript_expression",
+                            "pointer_expression"):
+                cur = cur.child_by_field_name("argument")
+            elif cur.type == "parenthesized_expression":
+                inner = [c for c in cur.children if c.type not in ("(", ")")]
+                cur = inner[0] if inner else None
+            else:
+                break
+        return False
+
+    PLACEHOLDER_STRUCT = "__A"
+
+    def remove_structs(self, struct_sel):
+        # Remove the selected struct definitions entirely, introduce one empty
+        # placeholder `struct __A {}`, and rewrite every usage of a removed
+        # struct type to `struct __A`. __A has no members, so drop the aggregate
+        # initializers of removed-struct variables and replace field accesses
+        # with a constant of the field's type (reads and writes alike: `x.f`,
+        # `x.f = e`, `x.f++` all become the constant). Variables of a removed
+        # struct type are matched precisely, so other structs' same-named fields
+        # are untouched.
+        names = {n.name for n in struct_sel
+                 if n.name != self.PLACEHOLDER_STRUCT}
+        if not names:
+            return self.content
+        root = parsers.get_parser(self.LANGUAGE).parse(
+            self.content.encode("utf-8")).root_node
+        field_type, svars, edits = {}, set(), []
+        def_spans, rename_ti = [], []
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type == "struct_specifier":
+                ti = next((c for c in n.children
+                           if c.type == "type_identifier"), None)
+                if ti is None or ti.text.decode("utf-8") not in names:
+                    continue
+                body = next((c for c in n.children
+                             if c.type == "field_declaration_list"), None)
+                if body is None:
+                    rename_ti.append(ti)
+                elif n.parent is not None \
+                        and n.parent.type == "translation_unit":
+                    field_type.update(self._c_struct_field_types(n))
+                    end = n.end_byte
+                    sib = n.next_sibling
+                    if sib is not None and sib.type == ";":
+                        end = sib.end_byte
+                    def_spans.append((n.start_byte, end))
+            elif n.type in ("declaration", "parameter_declaration") \
+                    and self._c_struct_type_of(n, names):
+                for nm in self._c_declared_names(n):
+                    svars.add(nm)
+                for c in n.children:
+                    if c.type != "init_declarator":
+                        continue
+                    decl = c.child_by_field_name("declarator")
+                    val = c.child_by_field_name("value")
+                    if decl is not None and val is not None \
+                            and val.type == "initializer_list":
+                        edits.append((decl.end_byte, val.end_byte, ""))
+        if not def_spans:
+            return self.content
+
+        for ti in rename_ti:
+            edits.append((ti.start_byte, ti.end_byte,
+                          self.PLACEHOLDER_STRUCT))
+        placeholder_exists = f"struct {self.PLACEHOLDER_STRUCT}" in self.content
+        for i, (s, e) in enumerate(sorted(def_spans)):
+            if i == 0 and not placeholder_exists:
+                edits.append((s, e, f"struct {self.PLACEHOLDER_STRUCT} {{}};"))
+            else:
+                edits.append((s, e, ""))
+
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type != "field_expression":
+                continue
+            fld = n.child_by_field_name("field")
+            base = n.child_by_field_name("argument")
+            if fld is None or base is None:
+                continue
+            fname = fld.text.decode("utf-8")
+            if fname not in field_type \
+                    or self._c_leftmost_id(base) not in svars:
+                continue
+            const = self._const(field_type[fname])
+            if self._c_is_assign_target(n):
+                p = n.parent
+                if p is not None and p.type == "update_expression":
+                    edits.append((p.start_byte, p.end_byte, const))
+                else:
+                    asg = self._c_find_ancestor(n, "assignment_expression")
+                    if asg is not None:
+                        edits.append((asg.start_byte, asg.end_byte, const))
+            else:
+                edits.append((n.start_byte, n.end_byte, const))
+        return self._splice_edits(self.content, edits)
+
     def remove_nodes(self, nodes_to_remove: set, mode: str) -> str:
         if mode not in ["removal", "replacement", "combination"]:
             raise ValueError(
@@ -1059,7 +1436,10 @@ class CDeclarationRemoval(ASTRemoval):
         self.removed_nodes.sort(key=lambda node: node.end_byte, reverse=True)
 
         edits = []
-        modified_code = tree.root_node.text
+        # Slice the exact bytes that were parsed (node offsets index into these);
+        # tree.root_node.text starts at the first token, so it would shift every
+        # cut when the source has leading whitespace/comments.
+        modified_code = self.content.encode("utf-8")
         visited_nodes = [False] * len(self.removed_nodes)
         for i, removed_node in enumerate(self.removed_nodes):
             if visited_nodes[i]:
