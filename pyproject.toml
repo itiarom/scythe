@@ -37,19 +37,16 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = [
-  "reducer",
-  "reducer.grammars",
-  "reducer.grammars.solidity",
-]
-py-modules = ["main"]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["scythe*"]
 
 [tool.setuptools.package-data]
 src = ["resources/*"]
 
 [project.scripts]
-scythe = "main:main"
+scythe = "scythe.cli:main"
 
 [tool.pytest.ini_options]
 addopts = "-vv"

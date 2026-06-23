@@ -9,9 +9,9 @@ import subprocess
 
 import pytest
 
-from reducer import parsers
-from reducer.graph import build_graph_from_file
-from reducer.modifications import AST_REMOVALS
+from scythe import parsers
+from scythe.graph import build_graph_from_file
+from scythe.rewrites import AST_REMOVALS
 
 
 def _javac_available():

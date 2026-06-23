@@ -3,10 +3,10 @@ import os
 import pytest
 import subprocess
 
-from reducer import utils
-from reducer.graph import DeclarationNode
-from reducer.modifications import CDeclarationRemoval
-from reducer.parsers import parse
+from scythe import utils
+from scythe.graph import DeclarationNode
+from scythe.rewrites import CDeclarationRemoval
+from scythe.parsers import parse
 
 REMOVAL_FUNCTION_NAME = "safe_lshift_func_int16_t_s_s"
 REMOVAL_GLOBAL_VAR_NAME_1 = "g_69"

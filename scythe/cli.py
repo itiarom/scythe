@@ -3,11 +3,11 @@ import resource
 import sys
 import time
 
-from reducer import utils
-from reducer.checker import PROPERTY_CHECKERS
-from reducer.dd import Interesting, perform_dd, parallel_probe_reduce
-from reducer.graph import build_graph_from_file
-from reducer.passes import LANGUAGES
+from scythe import utils
+from scythe.checker import PROPERTY_CHECKERS
+from scythe.dd import Interesting, perform_dd, parallel_probe_reduce
+from scythe.graph import build_graph_from_file
+from scythe.passes import LANGUAGES
 
 resource.setrlimit(resource.RLIMIT_STACK, (2**29, -1))
 sys.setrecursionlimit(10**6)

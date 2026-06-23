@@ -30,7 +30,7 @@ import json
 import os
 import sys
 
-from reducer import parsers
+from scythe import parsers
 
 # file extension -> (tree-sitter parser key, terminal node types that are
 # comments and must not be counted). tree-sitter-solidity and tree-sitter-c emit

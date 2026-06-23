@@ -1,7 +1,7 @@
 """End-to-end C reduction tests driving the scythe CLI with a local-gcc oracle.
 
 These exercise the Tier-1 C engine path (functions-first passes + fixpoint loop
-in main.py; the pure, parallel, cwd-isolated dd.py path) without the real
+in scythe/cli.py; the pure, parallel, cwd-isolated dd.py path) without the real
 benchmark oracles, which need Docker images / ccomp / clang. The property is a
 plain gcc compile-and-run check, so only gcc is required.
 """
@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-from reducer import parsers
+from scythe import parsers
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCYTHE = os.path.join(REPO_ROOT, ".venv", "bin", "scythe")

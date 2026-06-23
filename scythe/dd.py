@@ -7,9 +7,9 @@ import concurrent.futures as cf
 import networkx as nx
 import picire
 
-from reducer import utils
-from reducer.graph import build_graph_from_file
-from reducer.modifications import AST_REMOVALS
+from scythe import utils
+from scythe.graph import build_graph_from_file
+from scythe.rewrites import AST_REMOVALS
 
 PROBE_WORKERS = min(12, max(2, (os.cpu_count() or 4) - 2))
 

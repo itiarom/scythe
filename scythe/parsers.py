@@ -6,7 +6,7 @@ import tree_sitter_c  # type: ignore
 import tree_sitter_java  # type: ignore
 import tree_sitter_solidity  # type: ignore
 
-from reducer import utils
+from scythe import utils
 
 
 def _load_language(grammar_module) -> Language:
@@ -30,7 +30,7 @@ class _Query:
 
     Tree-sitter moved query execution onto :class:`QueryCursor` in 0.22 and
     changed ``captures`` to return ``dict[name, list[Node]]``.  The call sites
-    in :mod:`reducer.modifications` were written against the historical
+    in :mod:`scythe.rewrites` were written against the historical
     contract (``captures`` yields ``(node, capture_name)`` pairs in document
     order), so we re-present that here on top of the current API.
     """

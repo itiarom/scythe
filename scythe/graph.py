@@ -3,7 +3,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import networkx as nx
 
-from reducer import parsers
+from scythe import parsers
 
 EXPRESSION_MIN_BYTES = 40
 
