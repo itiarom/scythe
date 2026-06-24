@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Perses post-processor for scythe's --post-processor hook.
+#
+#   scythe --source-file foo.sol --script run.sh --language solidity \
+#          --post-processor scripts/perses
+#
+# scythe invokes this as `perses <source-file> <oracle-script>` once it reaches a
+# fixpoint. We reduce <source-file> further with Perses -- reusing scythe's own
+# oracle as Perses' --test-script -- and copy the result back in place, so the
+# final <source-file> is the combined scythe+Perses output.
+#
+# The environment (the right solc/java on PATH) is assumed already configured,
+# exactly as scythe assumes for its own oracle. Override the JVM/jar via:
+#   PERSES_JAVA   java binary to run Perses with   (default: java)
+#   PERSES_JAR    path to the Perses deploy jar     (default: <this dir>/perses_deploy.jar)
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+    echo "usage: perses <source-file> <oracle-script>" >&2
+    exit 2
+fi
+
+src="$1"
+script="$2"
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+jar="${PERSES_JAR:-$here/perses_deploy.jar}"
+java_bin="${PERSES_JAVA:-java}"
+
+# Perses requires absolute --input-file/--output-dir paths, stages the candidate
+# as program.<ext> in its own cwd, and writes <output-dir>/<input-basename>.
+ext="${src##*.}"
+abs_src="$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+staged="$work/program.$ext"
+persesout="$work/persesout"
+cp "$abs_src" "$staged"
+cp "$script" "$work/test.sh"
+chmod +x "$work/test.sh"
+
+"$java_bin" -jar "$jar" \
+    --enable-latra false \
+    --latra-fixpoint false \
+    --enable-trec false \
+    --test-script "$work/test.sh" \
+    --input-file "$staged" \
+    --output-dir "$persesout"
+
+if [[ -f "$persesout/program.$ext" ]]; then
+    cp "$persesout/program.$ext" "$abs_src"
+else
+    echo "perses: no output produced for $src" >&2
+    exit 1
+fi

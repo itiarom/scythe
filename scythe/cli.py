@@ -1,5 +1,7 @@
 import argparse
 import resource
+import shlex
+import subprocess
 import sys
 import time
 
@@ -26,6 +28,11 @@ def parse_args():
                         help="Source file to minimize (rewritten in place).")
     parser.add_argument("--script", required=True,
                         help="Property test script (exit 0 iff the property holds).")
+    parser.add_argument("--post-processor", metavar="CMD", default=None,
+                        help="After scythe reaches a fixpoint, run "
+                             "'CMD <source-file> <script>' to reduce the file "
+                             "further in place (e.g. a Perses wrapper). Omitted "
+                             "= scythe behaves exactly as without it.")
     return parser.parse_args()
 
 
@@ -72,6 +79,12 @@ def main():
     reduce_program(interesting, args.source_file, args.language)
 
     print(f"Execution time: {time.time() - start} seconds")
+
+    if args.post_processor:
+        cmd = [*shlex.split(args.post_processor), args.source_file, args.script]
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            sys.exit(result.returncode)
 
 
 if __name__ == "__main__":
