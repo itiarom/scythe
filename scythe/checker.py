@@ -69,7 +69,7 @@ class SolidityPropertyChecker(PropertyChecker):
 class CPropertyChecker(PropertyChecker):
     # C resolves $(pwd)/$1 and bind-mounts $(pwd) into a per-call dir.
     EXT = "c"
-    USE_TEMPDIR = True
+    USE_TEMPDIR = False
 
     def run_test_script(self, file_path: str = None, cwd: str = None) -> int:
         command = ["bash", self.test_script, file_path or self.file_path]

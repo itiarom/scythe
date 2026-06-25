@@ -32,7 +32,7 @@ java_bin="${PERSES_JAVA:-java}"
 ext="${src##*.}"
 abs_src="$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
 
-work="$(mktemp -d)"
+work="$(mktemp -d "$here/.perses-work.XXXXXXXX")"
 trap 'rm -rf "$work"' EXIT
 staged="$work/program.$ext"
 persesout="$work/persesout"

@@ -11,7 +11,7 @@ from scythe import utils
 from scythe.graph import build_graph_from_file
 from scythe.rewrites import AST_REMOVALS
 
-PROBE_WORKERS = min(12, max(2, (os.cpu_count() or 4) - 2))
+PROBE_WORKERS = min(8, max(2, (os.cpu_count() or 4) - 2))
 
 
 class Interesting():
