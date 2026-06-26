@@ -1,6 +1,6 @@
 # Scythe
 
-Scythe is a tool designed to minimize source code files by reducing their code, while keeping specific properties of the code. It supports both Solidity and C and is useful for simplifying code while retaining its functionality.
+Scythe is a semantic-aware program reducer that automatically minimizes source code while preserving specified properties. Using delta-debugging and language-specific reduction passes, it simplifies code for easier debugging and analysis across Solidity, C, and Java.
 
 ## Installation/Setup
 
@@ -19,7 +19,22 @@ Install it in editable mode
 pip install --editable .
 ```
 
-## Solidity Setup`
+## Usage
+
+Scythe supports the following command-line arguments:
+
+- `--language`: Specify the programming language. Options: `solidity`, `java`, or `c`. (Default: `"solidity"`)
+- `--source-file`: The source file to minimize (rewritten in place).
+- `--script`: The property test script (exit 0 iff the property holds).
+- `--post-processor`: Optional. After scythe reaches a fixpoint, run `CMD <source-file> <script>` to reduce the file further in place (e.g., a Perses wrapper). Omitted = scythe behaves exactly as without it.
+
+### Basic Command
+
+```bash
+scythe --source-file <file> --script <test-script> --language <lang>
+```
+
+## Solidity Setup
 
 Scythe uses the Solidity compiler, and you can install multiple versions of it using solc-select. Follow these steps to install it:
 
@@ -47,21 +62,7 @@ Once installed, you can run Slither on a Solidity file, such as:
 slither Solidity/smart2/original.sol
 ```
 
-### Solidity Usage
-
-Scythe supports the following arguments for solidity:
-
-	- `--language`: Specify the programming language. Options: `solidity`, `java` or `c.``(Default: `"solidity"`)
-	- `--source-file`: The source file to minimize.
-	- `--script`: The script to run during the reduction process.
-
-Each benchmark under `Solidity/smart*/` contains exactly three files:
-
-	- `original.sol`: the original (unminimized) smart contract.
-	- `test.sh`: the property test script (runs Slither and checks the expected finding count).
-	- `version`: the Solidity compiler version to use with `solc-select`.
-
-### Example Usage
+### Solidity Example Usage
 
 To reduce a Solidity smart contract (e.g., `Solidity/smart2`), follow these steps. Scythe
 minimizes its `--source-file` in place, so reduce a copy of `original.sol`:
@@ -80,35 +81,11 @@ scythe --source-file /tmp/program.sol --script ./Solidity/smart2/test.sh
 
 Note: For each smart contract, ensure that Slither runs with the appropriate Solidity compiler version. The `solc-select use <version>` command is mandatory before running Slither.
 
-### Running Solidity Benchmarks
+Each benchmark under `Solidity/smart*/` contains exactly three files:
 
-`run_solidity_benchmarks.sh` runs three reduction methods per benchmark and writes the
-minimized programs to an output directory (token counts / performance are measured separately):
-
-```
-# Run all benchmarks, writing results under ./output
-./run_solidity_benchmarks.sh -o output
-
-# Run a single benchmark
-./run_solidity_benchmarks.sh -o output -b smart2
-
-# Run only the Perses baseline, or only scythe (+ Perses on scythe's output)
-./run_solidity_benchmarks.sh -o output --only-perses
-./run_solidity_benchmarks.sh -o output --only-scythe
-```
-
-For each benchmark `<name>` it produces:
-
-```
-output/<name>/minimized_scythe.sol          # scythe on the original
-output/<name>/minimized_scythe_perses.sol   # Perses on scythe's output
-output/<name>/minimized_perses.sol          # baseline: Perses on the original
-output/<name>/time                          # one "method=seconds" line per method run
-```
-
-The workflow runs scythe on the original, then Perses on scythe's result
-(`scythe+perses`), and separately Perses on the original (`perses` baseline). The
-`scythe_perses` time is the sum of the scythe and Perses passes.
+	- `original.sol`: the original (unminimized) smart contract.
+	- `test.sh`: the property test script (runs Slither and checks the expected finding count).
+	- `version`: the Solidity compiler version to use with `solc-select`.
 
 ## C Setup
 
@@ -131,18 +108,9 @@ compiler.
 
 If your script uses CompCert make sure to install the needed version.
 
-### C Usage
+### C Example Usage
 
-Scythe supports the following arguments for C:
-
-	- `--language`: Specify the programming language. Options: `solidity`, `java` or `c.``(Default: `"solidity"`)
-	- `--source-file`: The source file to minimize. (Default: `"ext_changed.sol"`)
-	- `--script`: The script to run during the reduction process. (Default: `"./solidity2.sh"`)
-	- `--mode`: Only available for Java and C. The strategy to be followed by the reduction. Only accepts the values 'removal', 'replacement' and 'combination'
-
-### Example Usage
-
-To reduce a C program (e.g., `C/gcc-59903/small.c`) using the script `C/gcc-59903/r.sh`, follow these steps:
+To reduce a C program (e.g., `C/gcc-59903/original.c`) using the script `C/gcc-59903/test.sh`, follow these steps:
 
 ```
 # Install the required compiler version, or build a docker container for the 
@@ -152,20 +120,12 @@ docker build -t <compiler version (e.g. gcc-4.8.0)>  --file <dockerfile path (e.
 
 # Run Scythe on the source file
 
-scythe --source-file ./C/gcc-5990/small.c --script ./C/gcc-5990/r.sh --language c --mode removal
+scythe --source-file ./C/gcc-5990/original.c --script ./C/gcc-5990/test.sh --language c
 ```
 
-### Running C Benchmarks
-
-In order to run the benchmarks locally you will need to follow the setup 
-instructions.
-
-In each C benchmark directory two script the files `r.sh` and `test_r.sh` can
-be found. `r.sh` uses local versions of the required C compiler and `test_r.sh`
-uses docker containers with the required compiler installed. The benchmark scipt
-`./run_c_benchmarks.sh` uses `test_r.sh` as input.
-
-#### C Benchmark setup
+Each C benchmark directory contains test scripts:
+- `r.sh`: uses local versions of the required C compiler
+- `test_r.sh`: uses docker containers with the required compiler installed
 
 Install the CompCert compiler 3.7 version either using OPAM
 
@@ -199,50 +159,77 @@ Build the following docker containers from the root directory (this may take som
 
 You will also need to install the [Perses v2.5](https://github.com/uw-pluverse/perses)
 
-#### Running the C benchmarks
-
-To run all benchmarks for C, execute:
-
-```
-./run_c_benchmarks.sh
-```
-
-In the root directory a CSV file containing the results will be created.
-
 ## Java Setup
 
-Before using the tool on Java programs, run the initial setup script first.
+Before using the tool on Java programs, you need to ensure that Java is properly installed and configured. The project requires a compatible Java Development Kit (JDK) to compile and run Java programs.
+
+Run the initial setup script first:
 
 ```
 ./java_evaluation_utils/setup.sh
 ```
 
-### Java Usage
+### Java Example Usage
 
-Scythe supports the following arguments:
-
-	- `--language`: Specify the programming language. Options: `solidity`, `java` or `c.``(Default: `"solidity"`)
-	- `--source-file`: The source file to minimize. (Default: `"ext_changed.sol"`)
-	- `--script`: The script to run during the reduction process. (Default: `"./solidity2.sh"`)
-	- `--mode`: Only available for Java and C. The strategy to be followed by the reduction. Only accepts the values 'removal', 'replacement' and 'combination'
-
-### Example Usage
-
-To reduce a Java program (e.g., `Java/generator_modified/iter_1/Main.java`) using the script `Java/generator_modified/iter_1/run.sh`, follow these steps:
+To reduce a Java program (e.g., `Java/jdk-iter_21/Main.java`) using the script `Java/jdk-iter_21/run.sh`, follow these steps:
 
 ```
 # Run Scythe on the source file
 
-scythe --source-file ./Java/generator_modified/iter_1/Main.java --script ./Java/generator_modified/iter_1/run.sh --language java --mode removal
+scythe --source-file ./Java/jdk-iter_21/Main.java --script ./Java/jdk-iter_21/run.sh --language java
 ```
 
-### Running Java Benchmarks
+Each benchmark under `Java/jdk-iter_*/` or `Java/jdk-bugs-iter_*/` contains the following files:
 
-To run all benchmarks for Java, execute:
+	- `Main.java`: the original (unminimized) Java program.
+	- `run.sh`: the property test script that verifies the program's behavior.
+
+## Running Benchmarks
+
+`./scripts/run-benchmarks.sh` runs three reduction methods per benchmark and writes the
+minimized programs to an output directory (token counts / performance are measured separately).
+
+### Running All Benchmarks
+
+To run all benchmarks for a language:
+
+```bash
+# Run all benchmarks for a language
+./scripts/run-benchmarks.sh -o output -l solidity
+./scripts/run-benchmarks.sh -o output -l c
+./scripts/run-benchmarks.sh -o output -l java
+```
+
+### Running Specific Benchmarks
+
+```bash
+# Run a single benchmark
+./scripts/run-benchmarks.sh -o output -l solidity -b smart2
+./scripts/run-benchmarks.sh -o output -l c -b clang-23309
+./scripts/run-benchmarks.sh -o output -l java -b jdk-iter_21
+```
+
+### Running with Specific Reduction Methods
+
+```bash
+# Run only the Perses baseline
+./scripts/run-benchmarks.sh -o output -l solidity --only-perses
+
+# Run only scythe (+ Perses on scythe's output)
+./scripts/run-benchmarks.sh -o output -l solidity --only-scythe
+```
+
+### Benchmark Output
+
+For each benchmark `<name>` it produces:
 
 ```
-python run_java_benchmarks.py
+output/<name>/minimized_scythe.<ext>          # scythe on the original
+output/<name>/minimized_scythe_perses.<ext>   # Perses on scythe's output
+output/<name>/minimized_perses.<ext>          # baseline: Perses on the original
+output/<name>/time                            # one "method=seconds" line per method run
 ```
 
-A new directory with the name `java_evaluation_results_<timestamp>` will appear
-containing the reduction results on the files found in `./Java`
+The workflow runs scythe on the original, then Perses on scythe's result
+(`scythe+perses`), and separately Perses on the original (`perses` baseline). The
+`scythe_perses` time is the sum of the scythe and Perses passes.
