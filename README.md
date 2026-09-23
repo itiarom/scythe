@@ -4,8 +4,6 @@ Scythe is a semantic-aware program reducer that automatically minimizes source c
 
 ## Installation/Setup
 
-**The project requires Python 3.10.14**
-
 To install Scythe, clone the repository:
 
 ```bash
@@ -13,11 +11,33 @@ git clone https://github.com/chamitro/call_reducer.git
 cd call_reducer
 ```
 
+### Local installation
+
+**The project requires Python 3.10.14**
+
 Install it in editable mode
 
 ```bash
 pip install --editable .
 ```
+
+### Docker image setup
+
+To build the project Docker image with the repo tooling and benchmark wrappers already installed:
+
+```bash
+docker build -t scythe .
+```
+
+This image exposes the same CLI as the local installation and also includes helper commands for running benchmarks.
+
+The container supports the runtime modes for direct reducer execution and benchmark execution. A quick way to inspect the available entry points is to run the container help output, which lists the supported commands and examples.
+
+```bash
+docker run --rm -it -v "$PWD:/workspace" -w /workspace scythe --help
+```
+
+**This container can be used to avoid project setup directly.**
 
 ## Usage
 
@@ -81,6 +101,8 @@ scythe --source-file /tmp/program.sol --script ./Solidity/smart2/test.sh
 
 Note: For each smart contract, ensure that Slither runs with the appropriate Solidity compiler version. The `solc-select use <version>` command is mandatory before running Slither.
 
+**The project Docker image can be used instead of the local setup for Solidity examples.**
+
 Each benchmark under `Solidity/smart*/` contains exactly three files:
 
 	- `original.sol`: the original (unminimized) smart contract.
@@ -105,6 +127,8 @@ images for the following versions:
 
 The input script can then be modified to run the programs with the containerized
 compiler.
+
+**Do not confuse the containerized compilers used in these examples with the scythe container.**
 
 If your script uses CompCert make sure to install the needed version.
 
@@ -157,6 +181,8 @@ Build the following docker containers from the root directory (this may take som
     docker build -t gcc-4.9  --file ./dockerfiles/gcc_4_9.dockerfile .
    ```
 
+**The project Docker image can be used instead of the local setup for C examples.**
+
 You will also need to install the [Perses v2.5](https://github.com/uw-pluverse/perses)
 
 ## Java Setup
@@ -184,10 +210,14 @@ Each benchmark under `Java/jdk-iter_*/` or `Java/jdk-bugs-iter_*/` contains the 
 	- `Main.java`: the original (unminimized) Java program.
 	- `run.sh`: the property test script that verifies the program's behavior.
 
+**The project Docker image can be used instead of the local setup for Java examples.**
+
 ## Running Benchmarks
 
 `./scripts/run-benchmarks.sh` runs three reduction methods per benchmark and writes the
 minimized programs to an output directory (token counts / performance are measured separately).
+
+To avoid building the project follow the directions that use the scythe Docker container.
 
 ### Running All Benchmarks
 
@@ -200,6 +230,26 @@ To run all benchmarks for a language:
 ./scripts/run-benchmarks.sh -o output -l java
 ```
 
+With Docker, the same commands can be run through the project image:
+
+```bash
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  scythe benchmark -l solidity -o output
+
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -w /workspace \
+  scythe benchmark -l c -o output
+
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  scythe benchmark -l java -o output
+```
+
 ### Running Specific Benchmarks
 
 ```bash
@@ -207,6 +257,26 @@ To run all benchmarks for a language:
 ./scripts/run-benchmarks.sh -o output -l solidity -b smart2
 ./scripts/run-benchmarks.sh -o output -l c -b clang-23309
 ./scripts/run-benchmarks.sh -o output -l java -b jdk-iter_21
+```
+
+With Docker:
+
+```bash
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  scythe benchmark -l solidity -b smart2 -o output
+
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -w /workspace \
+  scythe benchmark -l c -b clang-23309 -o output
+
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  scythe benchmark -l java -b jdk-iter_21 -o output
 ```
 
 ### Running with Specific Reduction Methods
@@ -217,6 +287,20 @@ To run all benchmarks for a language:
 
 # Run only scythe (+ Perses on scythe's output)
 ./scripts/run-benchmarks.sh -o output -l solidity --only-scythe
+```
+
+With Docker:
+
+```bash
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  scythe benchmark -l solidity --only-perses -o output
+
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  scythe benchmark -l solidity --only-scythe -o output
 ```
 
 ### Benchmark Output
