@@ -181,7 +181,23 @@ Build the following docker containers from the root directory (this may take som
     docker build -t gcc-4.9  --file ./dockerfiles/gcc_4_9.dockerfile .
    ```
 
-**The project Docker image can be used instead of the local setup for C examples.**
+**The project Docker image can be used instead of the local setup for C examples, but C benchmark oracles require Docker access inside the container. The Docker socket must be mounted before the benchmark starts.**
+
+Before running a C benchmark, verify the required compiler images are already built:
+
+```bash
+./scripts/docker-setup.sh --language c --benchmark <bench-name>
+```
+
+Then run the benchmark with the host Docker socket mounted:
+
+```bash
+docker run --rm -it \
+  -v "$PWD:$PWD" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -w "$PWD" \
+  scythe benchmark -l c -o output
+```
 
 You will also need to install the [Perses v2.5](https://github.com/uw-pluverse/perses)
 
@@ -239,9 +255,9 @@ docker run --rm -it \
   scythe benchmark -l solidity -o output
 
 docker run --rm -it \
-  -v "$PWD:/workspace" \
+  -v "$PWD:$PWD" \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -w /workspace \
+  -w "$PWD" \
   scythe benchmark -l c -o output
 
 docker run --rm -it \
@@ -249,6 +265,8 @@ docker run --rm -it \
   -w /workspace \
   scythe benchmark -l java -o output
 ```
+
+For C benchmarks, the mounted socket is required and the benchmark runner will refuse to start if the required compiler images are not already present.
 
 ### Running Specific Benchmarks
 
@@ -268,9 +286,9 @@ docker run --rm -it \
   scythe benchmark -l solidity -b smart2 -o output
 
 docker run --rm -it \
-  -v "$PWD:/workspace" \
+  -v "$PWD:$PWD" \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -w /workspace \
+  -w "$PWD" \
   scythe benchmark -l c -b clang-23309 -o output
 
 docker run --rm -it \

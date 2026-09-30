@@ -23,8 +23,18 @@ Examples:
   docker run --rm -it -v "$PWD:/workspace" -w /workspace scythe \
     benchmark -l solidity -b smart2 -o output
 
-  docker run --rm -it -v "$PWD:/workspace" -v /var/run/docker.sock:/var/run/docker.sock -w /workspace scythe \
-    benchmark -l c -o output
+  # For C benchmarks, either mount the host Docker socket or run with Docker-in-Docker support.
+  docker run --rm -it --privileged \
+    -v "$PWD:$PWD" \
+    -w "$PWD" \
+    scythe benchmark -l c -o output
+
+  # The same absolute workspace path lets the host Docker daemon resolve nested bind mounts.
+  docker run --rm -it \
+    -v "$PWD:$PWD" \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -w "$PWD" \
+    scythe benchmark -l c -o output
 EOF
 }
 
@@ -73,6 +83,58 @@ prepare_scythe_environment() {
   fi
 }
 
+has_c_language() {
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "-l" || "$arg" == "--language" ]]; then
+      continue
+    fi
+    if [[ "$arg" == "c" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_docker_for_c() {
+  local args=("$@")
+  local arg
+
+  if [[ ${#args[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  local language=""
+  for ((i=0; i<${#args[@]}; i++)); do
+    arg="${args[$i]}"
+    if [[ "$arg" == "-l" || "$arg" == "--language" ]]; then
+      if (( i + 1 < ${#args[@]} )); then
+        language="${args[$((i + 1))]}"
+      fi
+      break
+    fi
+  done
+
+  if [[ "$language" != "c" ]]; then
+    return 0
+  fi
+
+  if [[ ! -S /var/run/docker.sock ]]; then
+    echo "Error: C benchmarks require the host Docker socket to be mounted at /var/run/docker.sock." >&2
+    echo "Run the container with: -v /var/run/docker.sock:/var/run/docker.sock" >&2
+    return 1
+  fi
+
+  export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    echo "Error: Docker is unavailable inside the container. Mount /var/run/docker.sock from the host." >&2
+    return 1
+  fi
+
+  return 0
+}
+
 if [[ $# -eq 0 ]]; then
   exec bash "$ROOT_DIR/scripts/run-benchmarks.sh"
 fi
@@ -85,18 +147,22 @@ case "$1" in
   scythe)
     shift
     prepare_scythe_environment "$@"
+    ensure_docker_for_c "$@"
     exec scythe "$@"
     ;;
   benchmark)
     shift
+    ensure_docker_for_c "$@"
     exec bash "$ROOT_DIR/scripts/run-benchmarks.sh" "$@"
     ;;
   *)
     if [[ "$1" == --source-file || "$1" == --script || "$1" == --language || "$1" == -l || "$1" == --benchmark || "$1" == -b || "$1" == --output || "$1" == -o || "$1" == --only-perses || "$1" == --only-scythe ]]; then
       prepare_scythe_environment "$@"
+      ensure_docker_for_c "$@"
       exec scythe "$@"
     fi
 
+    ensure_docker_for_c "$@"
     exec bash "$ROOT_DIR/scripts/run-benchmarks.sh" "$@"
     ;;
  esac
