@@ -1,9 +1,10 @@
-FROM python:3.10-slim
+FROM python:3.10-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PATH="/root/.opam/default/bin:${PATH}"
 
 WORKDIR /scythe
 
@@ -12,13 +13,16 @@ RUN apt-get update \
         bash \
         build-essential \
         ca-certificates \
+        clang \
+        clang-14 \
         curl \
         docker.io \
         git \
         jq \
+        libclang-rt-14-dev \
         m4 \
         opam \
-        openjdk-21-jdk-headless \
+        openjdk-17-jdk-headless \
         unzip \
         xz-utils \
         zip \
@@ -29,7 +33,10 @@ COPY . /scythe
 
 RUN python -m pip install --no-cache-dir solc-select slither-analyzer \
     && python -m pip install --no-cache-dir -e /scythe \
-    && bash /scythe/scripts/docker-setup.sh --language all
+    && bash /scythe/scripts/docker-setup.sh --language all \
+    && docker --version
+
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
 WORKDIR /workspace
 

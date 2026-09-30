@@ -188,8 +188,19 @@ build_c_images() {
 
   echo "Building C benchmark images from ${#files[@]} Dockerfiles"
   for dockerfile in "${files[@]}"; do
-    local tag
-    tag="$(basename "$dockerfile" .dockerfile | tr '_' '-')"
+    local name tag major minor patch assertions
+    name="$(basename "$dockerfile" .dockerfile)"
+    if [[ "$name" =~ ^(clang|gcc)_([0-9]+)_([0-9]+)(_([0-9]+))?(_assertions)?$ ]]; then
+      major="${BASH_REMATCH[2]}"
+      minor="${BASH_REMATCH[3]}"
+      patch="${BASH_REMATCH[5]}"
+      assertions="${BASH_REMATCH[6]}"
+      tag="${BASH_REMATCH[1]}-${major}.${minor}"
+      [[ -n "$patch" ]] && tag+=".${patch}"
+      [[ -n "$assertions" ]] && tag+="-assertions"
+    else
+      tag="${name//_/-}"
+    fi
     echo "  -> $tag"
     if $DRY_RUN; then
       echo "docker build -t "$tag" --file "$dockerfile" "$ROOT_DIR""

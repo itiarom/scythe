@@ -33,9 +33,10 @@
 # C specifics: the oracle pins its buggy/reference compilers via Docker, so the
 # `version` file is the bug-triggering image (e.g. gcc-4.8); it cannot be
 # auto-installed, and a missing image is a clean SKIP. The oracle bind-mounts the
-# candidate from $(pwd), so every method runs it with the candidate staged as
-# program.c in a throwaway cwd. Requires `docker` (the user must be able to run it
-# without sudo). No comment stripping is applied.
+# candidate from $(pwd), so candidates are staged under the working directory,
+# which must be mounted into the Docker daemon at the same absolute path. Requires
+# `docker` (the user must be able to run it without sudo). No comment stripping
+# is applied.
 #
 # Usage:
 #   ./run-benchmarks.sh [OPTIONS]
@@ -108,7 +109,59 @@ if [[ "$LANGUAGE" == "solidity" ]]; then
 fi
 if [[ "$LANGUAGE" == "c" ]]; then
     command -v docker >/dev/null || { echo "Error: docker not found (needed for the C oracles)." >&2; exit 1; }
+    if [[ ! -S /var/run/docker.sock && -z "${DOCKER_HOST:-}" ]]; then
+        echo "Error: C benchmarks require the Docker socket to be mounted at /var/run/docker.sock." >&2
+        echo "Run with: -v /var/run/docker.sock:/var/run/docker.sock" >&2
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "Error: Docker daemon is unavailable from inside the container. Mount /var/run/docker.sock or run on a Docker-enabled host." >&2
+        exit 1
+    fi
 fi
+
+ensure_c_compiler_images() {
+    local dir="$1"
+    local images=()
+    local name
+
+    if [[ -f "$dir/version" ]]; then
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && images+=("$name")
+        done < "$dir/version"
+    fi
+
+    if [[ ${#images[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # de-duplicate while preserving order
+    local dedup=()
+    local seen=()
+    for image in "${images[@]}"; do
+        if [[ " ${seen[*]} " != *" $image "* ]]; then
+            dedup+=("$image")
+            seen+=("$image")
+        fi
+    done
+    images=("${dedup[@]}")
+
+    local missing=()
+    local image
+    for image in "${images[@]}"; do
+        if ! docker image inspect "$image" >/dev/null 2>&1; then
+            missing+=("$image")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "  SKIP $(basename "$dir"): missing C compiler image(s): ${missing[*]}" >&2
+        echo "        Build them first with ./scripts/docker-setup.sh --language c --benchmark $(basename "$dir")" >&2
+        return 1
+    fi
+
+    return 0
+}
 
 # =============================================================================
 # Solidity compiler (solc) provisioning
@@ -274,9 +327,9 @@ run_scythe() {
     elif [[ "$LANGUAGE" == "c" ]]; then
         # The C oracles assume the candidate sits in $(pwd) (they bind-mount it
         # into the buggy-compiler container). Reduce a copy named program.c in a
-        # throwaway cwd so the oracle's byproducts (out*.txt, t, temp .c files)
-        # never litter the repo, then copy the reduced result back.
-        work="$(mktemp -d)"
+        # workspace-mounted throwaway cwd so nested Docker can access it and the
+        # oracle's byproducts never litter the repo.
+        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
         cp "$src" "$work/program.c"
         ( cd "$work" && "$SCYTHE" --source-file program.c --script "$test" \
                        --language c ) >/dev/null 2>&1
@@ -296,7 +349,11 @@ run_scythe() {
 run_perses() {
     local input="$1" output="$2" test_script="$3" version="$4"
     local work persesout staged start end
-    work="$(mktemp -d)"
+    if [[ "$LANGUAGE" == "c" ]]; then
+        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
+    else
+        work="$(mktemp -d)"
+    fi
     persesout="$work/persesout"
     staged="$work/program.$EXT"
     cp "$input" "$staged"
@@ -355,7 +412,7 @@ select_compiler() {
 # Run the oracle on a candidate with the benchmark's compiler active, in a
 # throwaway cwd (for Java, contains javac output). Returns the oracle's exit code.
 oracle_holds() {
-    local test="$1" candidate="$2" rc work
+    local test="$1" candidate="$2" rc work log
     if [[ "$LANGUAGE" == "java" ]]; then
         work="$(mktemp -d)"
         ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" bash "$test" "$candidate" ) >/dev/null 2>&1
@@ -363,11 +420,17 @@ oracle_holds() {
         rm -rf "$work"
     elif [[ "$LANGUAGE" == "c" ]]; then
         # Mirror the C oracle's "candidate lives in $(pwd)" contract: stage it as
-        # program.c in a throwaway cwd and invoke the test with no argument.
-        work="$(mktemp -d)"
+        # program.c in a daemon-visible throwaway cwd and invoke the test with no
+        # argument. The workspace must be mounted at the same absolute path.
+        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
+        log="$work/oracle.log"
         cp "$candidate" "$work/program.c"
-        ( cd "$work" && bash "$test" ) >/dev/null 2>&1
+        ( cd "$work" && bash "$test" ) >"$log" 2>&1
         rc=$?
+        if [[ $rc -ne 0 ]]; then
+            echo "  C oracle output:" >&2
+            cat "$log" >&2
+        fi
         rm -rf "$work"
     else
         bash "$test" "$candidate" >/dev/null 2>&1
@@ -393,6 +456,10 @@ run_benchmark() {
     echo "=== $name ($LANGUAGE, version $version) ==="
     local abs_test; abs_test="$(cd "$dir" && pwd)/test.sh"
 
+    if [[ "$LANGUAGE" == "c" ]] && ! ensure_c_compiler_images "$dir"; then
+        return
+    fi
+
     if ! select_compiler "$version"; then
         echo "  SKIP $name: compiler for version '$version' unavailable." >&2
         return
@@ -400,7 +467,12 @@ run_benchmark() {
 
     # Stage a single shared input so every method starts from the same program.
     # Solidity strips comments once; Java is staged verbatim.
-    local staged; staged="$(mktemp --suffix=".$EXT")"
+    local staged
+    if [[ "$LANGUAGE" == "c" ]]; then
+        staged="$(mktemp "$PWD/.scythe-stage.XXXXXX.$EXT")"
+    else
+        staged="$(mktemp --suffix=".$EXT")"
+    fi
     cp "$original" "$staged"
     if [[ "$LANGUAGE" == "solidity" ]]; then
         python3 "$DELETE_COMMENTS" --filepath "$staged" >/dev/null 2>&1 \
