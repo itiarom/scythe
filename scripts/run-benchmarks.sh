@@ -1,4 +1,51 @@
 #!/bin/bash
+#
+# Run the reduction benchmarks (Solidity, Java, or C) and collect the minimized
+# programs for three methods, so a separate script can later measure token
+# counts / performance.
+#
+#   scythe         : scythe on the original program
+#   scythe+perses  : Perses on the program produced by scythe
+#   perses          : baseline -- Perses on the original program
+#
+# For each benchmark <name> the following files are written under the output dir
+# (the extension is .sol for Solidity, .java for Java):
+#
+#   <out>/<name>/original.<ext>
+#   <out>/<name>/minimized_scythe.<ext>
+#   <out>/<name>/minimized_scythe_perses.<ext>
+#   <out>/<name>/minimized_perses.<ext>
+#   <out>/<name>/time                       # one "method=seconds" line per method,
+#                                           # incl. scythe_perses = scythe + its Perses pass
+#
+# Each benchmark dir holds exactly: original.<ext>, test.sh, version (C also
+# keeps r.sh, the pristine creduce script, for provenance).
+#   Solidity (Solidity/smart*/): version = solc version;       scythe --mode removal
+#   Java     (Java/*/):          version = javac major (8/11);  scythe --mode replacement
+#   C        (C/*/):             version = bug-compiler image;  scythe --mode replacement
+#
+# Java specifics: the `version` file selects a JDK via SDKMAN (auto-installed if
+# missing). The oracle (test.sh) compiles with that JDK's `javac`, but Perses
+# itself needs a modern JVM, so it is launched with a modern `java` while the
+# benchmark JDK is placed first on PATH -- the oracle subprocess Perses spawns
+# then resolves the right `javac` with no hardcoded paths.
+#
+# C specifics: the oracle pins its buggy/reference compilers via Docker, so the
+# `version` file is the bug-triggering image (e.g. gcc-4.8); it cannot be
+# auto-installed, and a missing image is a clean SKIP. The oracle bind-mounts the
+# candidate from $(pwd), so candidates are staged under the working directory,
+# which must be mounted into the Docker daemon at the same absolute path. Requires
+# `docker` (the user must be able to run it without sudo). No comment stripping
+# is applied.
+#
+# Usage:
+#   ./run-benchmarks.sh [OPTIONS]
+#     -l, --language LANG   solidity (default), java, or c
+#     -o, --output DIR      Output directory (default: ./output)
+#     -b, --benchmark NAME  Run a single benchmark (e.g. smart2 / jdk-bugs-iter_1)
+#         --only-perses     Run only the Perses baseline
+#         --only-scythe    Run scythe and scythe+perses only (skip the baseline)
+#     -h, --help            Show this help
 
 set -uo pipefail
 
@@ -54,8 +101,65 @@ if [[ "$LANGUAGE" == "solidity" ]]; then
 fi
 if [[ "$LANGUAGE" == "c" ]]; then
     command -v docker >/dev/null || { echo "Error: docker not found (needed for the C oracles)." >&2; exit 1; }
+    if [[ ! -S /var/run/docker.sock && -z "${DOCKER_HOST:-}" ]]; then
+        echo "Error: C benchmarks require the Docker socket to be mounted at /var/run/docker.sock." >&2
+        echo "Run with: -v /var/run/docker.sock:/var/run/docker.sock" >&2
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "Error: Docker daemon is unavailable from inside the container. Mount /var/run/docker.sock or run on a Docker-enabled host." >&2
+        exit 1
+    fi
 fi
 
+ensure_c_compiler_images() {
+    local dir="$1"
+    local images=()
+    local name
+
+    if [[ -f "$dir/version" ]]; then
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && images+=("$name")
+        done < "$dir/version"
+    fi
+
+    if [[ ${#images[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # de-duplicate while preserving order
+    local dedup=()
+    local seen=()
+    for image in "${images[@]}"; do
+        if [[ " ${seen[*]} " != *" $image "* ]]; then
+            dedup+=("$image")
+            seen+=("$image")
+        fi
+    done
+    images=("${dedup[@]}")
+
+    local missing=()
+    local image
+    for image in "${images[@]}"; do
+        if ! docker image inspect "$image" >/dev/null 2>&1; then
+            missing+=("$image")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "  SKIP $(basename "$dir"): missing C compiler image(s): ${missing[*]}" >&2
+        echo "        Build them first with ./scripts/docker-setup.sh --language c --benchmark $(basename "$dir")" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+# =============================================================================
+# Solidity compiler (solc) provisioning
+# =============================================================================
+
+# True if solc-select already has the given version installed.
 solc_installed() {
     solc-select versions 2>/dev/null | sed 's/[[:space:]].*//' | grep -Fxq "$1"
 }
@@ -174,7 +278,11 @@ run_scythe() {
                        --language java ) >/dev/null 2>&1
         rm -rf "$work"
     elif [[ "$LANGUAGE" == "c" ]]; then
-        work="$(mktemp -d)"
+        # The C oracles assume the candidate sits in $(pwd) (they bind-mount it
+        # into the buggy-compiler container). Reduce a copy named program.c in a
+        # workspace-mounted throwaway cwd so nested Docker can access it and the
+        # oracle's byproducts never litter the repo.
+        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
         cp "$src" "$work/program.c"
         ( cd "$work" && "$SCYTHE" --source-file program.c --script "$test" \
                        --language c ) >/dev/null 2>&1
@@ -190,7 +298,11 @@ run_scythe() {
 run_perses() {
     local input="$1" output="$2" test_script="$3" version="$4"
     local work persesout staged start end
-    work="$(mktemp -d)"
+    if [[ "$LANGUAGE" == "c" ]]; then
+        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
+    else
+        work="$(mktemp -d)"
+    fi
     persesout="$work/persesout"
     staged="$work/program.$EXT"
     cp "$input" "$staged"
@@ -235,17 +347,25 @@ select_compiler() {
 }
 
 oracle_holds() {
-    local test="$1" candidate="$2" rc work
+    local test="$1" candidate="$2" rc work log
     if [[ "$LANGUAGE" == "java" ]]; then
         work="$(mktemp -d)"
         ( cd "$work" && PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" bash "$test" "$candidate" ) >/dev/null 2>&1
         rc=$?
         rm -rf "$work"
     elif [[ "$LANGUAGE" == "c" ]]; then
-        work="$(mktemp -d)"
+        # Mirror the C oracle's "candidate lives in $(pwd)" contract: stage it as
+        # program.c in a daemon-visible throwaway cwd and invoke the test with no
+        # argument. The workspace must be mounted at the same absolute path.
+        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
+        log="$work/oracle.log"
         cp "$candidate" "$work/program.c"
-        ( cd "$work" && bash "$test" ) >/dev/null 2>&1
+        ( cd "$work" && bash "$test" ) >"$log" 2>&1
         rc=$?
+        if [[ $rc -ne 0 ]]; then
+            echo "  C oracle output:" >&2
+            cat "$log" >&2
+        fi
         rm -rf "$work"
     else
         bash "$test" "$candidate" >/dev/null 2>&1
@@ -271,12 +391,23 @@ run_benchmark() {
     echo "=== $name ($LANGUAGE, version $version) ==="
     local abs_test; abs_test="$(cd "$dir" && pwd)/test.sh"
 
+    if [[ "$LANGUAGE" == "c" ]] && ! ensure_c_compiler_images "$dir"; then
+        return
+    fi
+
     if ! select_compiler "$version"; then
         echo "  SKIP $name: compiler for version '$version' unavailable." >&2
         return
     fi
 
-    local staged; staged="$(mktemp --suffix=".$EXT")"
+    # Stage a single shared input so every method starts from the same program.
+    # Solidity strips comments once; Java is staged verbatim.
+    local staged
+    if [[ "$LANGUAGE" == "c" ]]; then
+        staged="$(mktemp "$PWD/.scythe-stage.XXXXXX.$EXT")"
+    else
+        staged="$(mktemp --suffix=".$EXT")"
+    fi
     cp "$original" "$staged"
     if [[ "$LANGUAGE" == "solidity" ]]; then
         python3 "$DELETE_COMMENTS" --filepath "$staged" >/dev/null 2>&1 \
