@@ -8,6 +8,7 @@ import time
 from scythe import utils
 from scythe.checker import PROPERTY_CHECKERS
 from scythe.dd import Interesting, perform_dd, parallel_probe_reduce
+from scythe.deferral import DeferralTracker
 from scythe.graph import build_graph_from_file
 from scythe.passes import LANGUAGES
 
@@ -35,12 +36,21 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_to_fixpoint(file_path, sweep):
+def run_to_fixpoint(file_path, sweep, deferral=None):
+    # A sweep that changed nothing but deferred some probes is followed by a
+    # full sweep, so the fixpoint is the same as without deferral.
+    full = False
     while True:
         before = utils.read_file(file_path)
+        if deferral is not None:
+            deferral.start_sweep(full)
         sweep()
-        if utils.read_file(file_path) == before:
+        if utils.read_file(file_path) != before:
+            full = False
+        elif full or deferral is None or not deferral.skipped_this_sweep:
             return
+        else:
+            full = True
 
 
 def reduce_program(interesting, file_path, language):
@@ -59,7 +69,7 @@ def reduce_program(interesting, file_path, language):
             else:
                 perform_dd(interesting, node_filter, parallel=True)
 
-    run_to_fixpoint(file_path, sweep)
+    run_to_fixpoint(file_path, sweep, interesting.deferral)
 
 
 def main():
@@ -69,12 +79,15 @@ def main():
     graph = build_graph_from_file(args.source_file, args.language)
     checker = PROPERTY_CHECKERS[args.language](args.source_file, args.script)
     content = utils.read_file(args.source_file)
+    deferral = DeferralTracker() if args.language == "c" else None
     interesting = Interesting(graph, content, checker, args.language,
-                              LANGUAGES[args.language].mode)
+                              LANGUAGES[args.language].mode, deferral)
 
     reduce_program(interesting, args.source_file, args.language)
 
     print(f"Execution time: {time.time() - start} seconds")
+    print(f"Oracle runs: {interesting.oracle_runs}"
+          + (f", deferred probes: {deferral.skipped}" if deferral else ""))
 
     if args.post_processor:
         cmd = [*shlex.split(args.post_processor), args.source_file, args.script]

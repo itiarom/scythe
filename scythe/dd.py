@@ -19,7 +19,8 @@ class Interesting():
                  content,
                  prop_checker,
                  language: str,
-                 mode: str):
+                 mode: str,
+                 deferral=None):
         self.graph = graph
         self.prop_checker = prop_checker
         self.content = content
@@ -35,6 +36,8 @@ class Interesting():
         self.removal_mode = mode
         self._lock = threading.Lock()
         self.prop_cache = {}
+        self.deferral = deferral
+        self.oracle_runs = 0
 
     def reset_state(self):
         self.cache = {}
@@ -76,6 +79,7 @@ class Interesting():
         with self._lock:
             if key in self.prop_cache:
                 return self.prop_cache[key]
+            self.oracle_runs += 1
         out = self.prop_checker.run_oracle(content)
         with self._lock:
             self.prop_cache[key] = out
@@ -88,6 +92,7 @@ class Interesting():
         key = hashlib.sha256(content.encode("utf-8")).hexdigest()
         out = self.prop_cache.get(key)
         if out != 0:
+            self.oracle_runs += 1
             out = self.prop_checker.run_oracle(content)
             self.prop_cache[key] = out
         if out == 0:
@@ -178,7 +183,7 @@ def _node_range(n):
     return None
 
 
-def _coarse_probe(interesting, nodes, mode):
+def _coarse_probe(interesting, nodes, mode, deferral=None):
     ranges = {n: _node_range(n) for n in nodes}
 
     def contains(a, b):
@@ -202,13 +207,17 @@ def _coarse_probe(interesting, nodes, mode):
                        if not any(contains(o, c) for o in nodes)), key=key)
     removable = []
     while frontier:
+        to_probe = [n for n in frontier
+                    if deferral is None or deferral.should_probe(n)]
         with cf.ThreadPoolExecutor(max_workers=PROBE_WORKERS) as ex:
-            verdicts = list(ex.map(holds, frontier))
+            verdicts = dict(zip(to_probe, ex.map(holds, to_probe)))
         nxt = set()
-        for n, ok in zip(frontier, verdicts):
-            if ok:
+        for n in frontier:
+            if verdicts.get(n, False):
                 removable.append(n)
             else:
+                if deferral is not None and n in verdicts:
+                    deferral.record_failure(n)
                 nxt.update(children(n))
         frontier = sorted(nxt, key=key)
     return removable
@@ -246,7 +255,10 @@ def parallel_probe_reduce(interesting, node_filter):
         if not nodes:
             break
         interesting._build_candidate({nodes[0]}, mode)
-        removable = _coarse_probe(interesting, nodes, mode)
+        if interesting.deferral is not None:
+            interesting.deferral.begin_round(interesting.base_content, nodes)
+        removable = _coarse_probe(interesting, nodes, mode,
+                                  interesting.deferral)
         if not removable:
             break
         committed = _commit_max(interesting, removable, mode)
