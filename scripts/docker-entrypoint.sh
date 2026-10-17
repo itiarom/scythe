@@ -127,6 +127,14 @@ ensure_docker_for_c() {
 
   export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
 
+  # scythe stages every C candidate in a tempfile.mkdtemp() dir that the oracle
+  # bind-mounts into the compiler containers. The host daemon cannot see the
+  # container's /tmp, so keep temp dirs under the (same-path mounted) workspace.
+  if [[ -z "${TMPDIR:-}" ]]; then
+    export TMPDIR="$PWD/.scythe-tmp"
+    mkdir -p "$TMPDIR"
+  fi
+
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     echo "Error: Docker is unavailable inside the container. Mount /var/run/docker.sock from the host." >&2
     return 1

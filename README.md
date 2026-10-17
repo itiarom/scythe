@@ -189,6 +189,8 @@ Before running a C benchmark, verify the required compiler images are already bu
 ./scripts/docker-setup.sh --language c --benchmark <bench-name>
 ```
 
+This also installs CompCert 3.7 for C benchmark oracles that require it.
+
 Then run the benchmark with the host Docker socket mounted:
 
 ```bash
@@ -267,6 +269,10 @@ docker run --rm -it \
 ```
 
 For C benchmarks, the mounted socket is required and the benchmark runner will refuse to start if the required compiler images are not already present.
+
+Perses runs with `-XX:MaxRAMPercentage=75` by default. Large inputs (e.g. `clang-27137`) run
+out of heap with the JVM default; override the JVM options with `PERSES_JAVA_OPTS`, e.g.
+`PERSES_JAVA_OPTS=-Xmx14g ./scripts/run-benchmarks.sh ...` or `docker run -e PERSES_JAVA_OPTS=-Xmx14g ...`.
 
 ### Running Specific Benchmarks
 

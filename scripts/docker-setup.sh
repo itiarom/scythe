@@ -212,21 +212,34 @@ build_c_images() {
 
 install_compcert() {
   if ! command -v opam >/dev/null 2>&1; then
-    echo "opam is required for CompCert. Install opam and then rerun this setup step."
-    return 0
+    echo "opam is required for CompCert. Install opam and then rerun this setup step." >&2
+    return 1
   fi
 
   echo "Initialising opam and installing CompCert 3.7"
   if $DRY_RUN; then
     echo "opam init --disable-sandboxing -a --bare"
-    echo "opam install -y coq-compcert.3.7~coq-platform coq.8.11.0"
+    echo "opam repository add coq-released https://coq.inria.fr/opam/released --set-default"
+    echo "opam switch create scythe-compcert --packages=ocaml-base-compiler.4.11.2 -y"
+    echo "opam env --switch=scythe-compcert --set-switch"
+    echo "opam install -y coq-compcert.3.7~coq-platform coq.8.11.2"
     return 0
   fi
 
   export OPAMYES=1
-  opam init --disable-sandboxing -a --bare >/dev/null 2>&1 || true
-  eval "$(opam env --switch=default --set-switch)"
-  opam install -y coq-compcert.3.7~coq-platform coq.8.11.0 >/dev/null 2>&1 || true
+  opam init --disable-sandboxing -a --bare
+  opam repository add coq-released https://coq.inria.fr/opam/released --set-default
+  if ! opam switch list --short | grep -Fxq scythe-compcert; then
+    opam switch create scythe-compcert --packages=ocaml-base-compiler.4.11.2 -y
+  fi
+  eval "$(opam env --switch=scythe-compcert --set-switch)"
+  opam install -y coq-compcert.3.7~coq-platform coq.8.11.2
+
+  if ! command -v ccomp >/dev/null 2>&1 || ! ccomp -version | grep -q 'version 3\.7'; then
+    echo "CompCert 3.7 installation completed, but the expected ccomp was not found on PATH." >&2
+    return 1
+  fi
+  ccomp -version
 }
 
 parse_args() {
@@ -279,6 +292,7 @@ main() {
       ;;
     c)
       build_c_images
+      install_compcert
       ;;
     compcert)
       install_compcert
