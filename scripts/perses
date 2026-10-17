@@ -12,6 +12,7 @@ script="$2"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 jar="${PERSES_JAR:-$here/perses_deploy.jar}"
 java_bin="${PERSES_JAVA:-java}"
+read -r -a jvm_args <<< "${PERSES_JAVA_OPTS:--XX:MaxRAMPercentage=75}"
 
 ext="${src##*.}"
 abs_src="$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
@@ -24,7 +25,7 @@ cp "$abs_src" "$staged"
 cp "$script" "$work/test.sh"
 chmod +x "$work/test.sh"
 
-"$java_bin" -jar "$jar" \
+"$java_bin" "${jvm_args[@]}" -jar "$jar" \
     --enable-latra false \
     --latra-fixpoint false \
     --enable-trec false \

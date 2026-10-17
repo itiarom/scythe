@@ -46,11 +46,17 @@
 #         --only-perses     Run only the Perses baseline
 #         --only-scythe    Run scythe and scythe+perses only (skip the baseline)
 #     -h, --help            Show this help
+#
+# Environment:
+#   PERSES_JAVA_OPTS   JVM options for Perses (default: -XX:MaxRAMPercentage=75).
+#                      Large inputs (e.g. C/clang-27137) exhaust the JVM's default
+#                      heap (1/4 of RAM) while parsing; raise it with e.g. -Xmx14g.
 
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PERSES_JAR="$ROOT_DIR/perses_deploy.jar"
+read -r -a PERSES_JVM_ARGS <<< "${PERSES_JAVA_OPTS:--XX:MaxRAMPercentage=75}"
 DELETE_COMMENTS="$ROOT_DIR/delete_comments.py"
 
 LANGUAGE="solidity"
@@ -297,7 +303,7 @@ run_scythe() {
 
 run_perses() {
     local input="$1" output="$2" test_script="$3" version="$4"
-    local work persesout staged start end
+    local work persesout staged perses_log start end perses_status=0
     if [[ "$LANGUAGE" == "c" ]]; then
         work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
     else
@@ -305,27 +311,41 @@ run_perses() {
     fi
     persesout="$work/persesout"
     staged="$work/program.$EXT"
+    perses_log="$work/perses.log"
     cp "$input" "$staged"
     cp "$test_script" "$work/test.sh"
     chmod +x "$work/test.sh"
     start=$(date +%s)
     if [[ "$LANGUAGE" == "java" ]]; then
-        PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" "$PERSES_JAVA" -jar "$PERSES_JAR" \
+        PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" "$PERSES_JAVA" "${PERSES_JVM_ARGS[@]}" -jar "$PERSES_JAR" \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
-            --output-dir "$persesout" >/dev/null 2>&1
+            --output-dir "$persesout" >"$perses_log" 2>&1 || perses_status=$?
+    elif [[ "$LANGUAGE" == "c" ]]; then
+        ( cd "$work" && java "${PERSES_JVM_ARGS[@]}" -jar "$PERSES_JAR" \
+            --test-script "$work/test.sh" \
+            --input-file "$staged" \
+            --output-dir "$persesout" ) >"$perses_log" 2>&1 || perses_status=$?
     else
         [[ "$LANGUAGE" == "solidity" ]] && solc-select use "$version" >/dev/null 2>&1
-        java -jar "$PERSES_JAR" \
+        java "${PERSES_JVM_ARGS[@]}" -jar "$PERSES_JAR" \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
-            --output-dir "$persesout" >/dev/null 2>&1
+            --output-dir "$persesout" >"$perses_log" 2>&1 || perses_status=$?
     fi
     end=$(date +%s)
+    if [[ $perses_status -ne 0 ]]; then
+        echo "  WARN: Perses exited with status $perses_status for $(basename "$(dirname "$output")"); last log lines:" >&2
+        tail -n 40 "$perses_log" >&2
+    fi
     if [[ -f "$persesout/program.$EXT" ]]; then
         cp "$persesout/program.$EXT" "$output"
     else
-        echo "  WARN: Perses produced no output for $(basename "$(dirname "$output")")" >&2
+        if [[ $perses_status -eq 0 ]]; then
+            echo "  WARN: Perses produced no output for $(basename "$(dirname "$output")")" >&2
+            tail -n 40 "$perses_log" >&2
+            find "$persesout" -maxdepth 2 -type f -print >&2
+        fi
     fi
     rm -rf "$work"
     echo $((end - start))

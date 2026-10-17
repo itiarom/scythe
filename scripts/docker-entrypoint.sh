@@ -30,7 +30,9 @@ Examples:
     scythe benchmark -l c -o output
 
   # The same absolute workspace path lets the host Docker daemon resolve nested bind mounts.
+  # seccomp=unconfined lets the entrypoint disable ASLR for the sanitizer-based C oracles.
   docker run --rm -it \
+    --security-opt seccomp=unconfined \
     -v "$PWD:$PWD" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -w "$PWD" \
@@ -126,6 +128,7 @@ ensure_docker_for_c() {
   fi
 
   export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+  warn_if_aslr_enabled_for_c
 
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     echo "Error: Docker is unavailable inside the container. Mount /var/run/docker.sock from the host." >&2
@@ -133,6 +136,29 @@ ensure_docker_for_c() {
   fi
 
   return 0
+}
+
+# The C oracles build their candidates with the image's clang-14 sanitizers
+# (ASan/UBSan/MSan), which crash at random under the high-entropy ASLR of recent
+# host kernels (vm.mmap_rnd_bits=32). That makes the oracle flaky, so the
+# original program "fails" the property check and Perses/scythe cannot reduce.
+# Re-exec once with ASLR disabled; every process we spawn inherits it.
+# setarch needs the personality syscall, which Docker's default seccomp profile
+# blocks, so C runs need `--security-opt seccomp=unconfined` (or --privileged).
+if [[ -z "${SCYTHE_ASLR_DISABLED:-}" ]]; then
+  export SCYTHE_ASLR_DISABLED=1
+  if setarch "$(uname -m)" -R true >/dev/null 2>&1; then
+    exec setarch "$(uname -m)" -R "$0" "$@"
+  fi
+  export SCYTHE_ASLR_DISABLED=0
+fi
+
+warn_if_aslr_enabled_for_c() {
+  if [[ "${SCYTHE_ASLR_DISABLED:-0}" != "1" ]]; then
+    echo "Warning: could not disable ASLR inside the container; the C oracles' sanitizer builds" >&2
+    echo "         may crash at random and make the property check flaky." >&2
+    echo "         Run the container with: --security-opt seccomp=unconfined" >&2
+  fi
 }
 
 if [[ $# -eq 0 ]]; then

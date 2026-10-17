@@ -11,4 +11,6 @@ venv
 .DS_Store
 output/
 **/.perses-work.*
+.scythe-work.*
+.scythe-stage.*
 **/__pycache__/
