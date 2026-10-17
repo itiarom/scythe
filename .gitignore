@@ -145,3 +145,8 @@ build/
 compile_err.txt
 a.out
 *.class
+# Benchmark runner scratch dirs (run-benchmarks.sh / scythe container)
+.scythe-work.*
+.scythe-stage.*
+.scythe-tmp/
+PersesTempRoot_*/

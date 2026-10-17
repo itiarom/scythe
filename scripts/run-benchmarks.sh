@@ -287,10 +287,12 @@ run_scythe() {
         # The C oracles assume the candidate sits in $(pwd) (they bind-mount it
         # into the buggy-compiler container). Reduce a copy named program.c in a
         # workspace-mounted throwaway cwd so nested Docker can access it and the
-        # oracle's byproducts never litter the repo.
+        # oracle's byproducts never litter the repo. scythe runs each candidate's
+        # oracle in a tempfile.mkdtemp() dir, so point TMPDIR there too: the
+        # container's /tmp is invisible to the host daemon's nested bind mounts.
         work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
         cp "$src" "$work/program.c"
-        ( cd "$work" && "$SCYTHE" --source-file program.c --script "$test" \
+        ( cd "$work" && TMPDIR="$work" "$SCYTHE" --source-file program.c --script "$test" \
                        --language c ) >/dev/null 2>&1
         cp "$work/program.c" "$src"
         rm -rf "$work"

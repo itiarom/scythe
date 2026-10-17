@@ -13,4 +13,5 @@ output/
 **/.perses-work.*
 .scythe-work.*
 .scythe-stage.*
+.scythe-tmp
 **/__pycache__/
