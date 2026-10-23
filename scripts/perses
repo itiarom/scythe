@@ -25,10 +25,10 @@ cp "$abs_src" "$staged"
 cp "$script" "$work/test.sh"
 chmod +x "$work/test.sh"
 
+read -r -a perses_flags <<< "${PERSES_FLAGS:---enable-latra false --enable-trec false}"
+
 "$java_bin" "${jvm_args[@]}" -jar "$jar" \
-    --enable-latra false \
-    --latra-fixpoint false \
-    --enable-trec false \
+    "${perses_flags[@]}" \
     --test-script "$work/test.sh" \
     --input-file "$staged" \
     --output-dir "$persesout"

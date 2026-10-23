@@ -275,6 +275,7 @@ For C benchmarks, the mounted socket is required and the benchmark runner will r
 Perses runs with `-XX:MaxRAMPercentage=75` by default. Large inputs (e.g. `clang-27137`) run
 out of heap with the JVM default; override the JVM options with `PERSES_JAVA_OPTS`, e.g.
 `PERSES_JAVA_OPTS=-Xmx14g ./scripts/run-benchmarks.sh ...` or `docker run -e PERSES_JAVA_OPTS=-Xmx14g ...`.
+Perses options are taken from `PERSES_FLAGS` (default: `--enable-latra false --enable-trec false`).
 
 ### Running Specific Benchmarks
 
@@ -342,4 +343,6 @@ output/<name>/time                            # one "method=seconds" line per me
 
 The workflow runs scythe on the original, then Perses on scythe's result
 (`scythe+perses`), and separately Perses on the original (`perses` baseline). The
-`scythe_perses` time is the sum of the scythe and Perses passes.
+`scythe_perses` time is the sum of the scythe and Perses passes. For C, scythe and
+Perses alternate until neither changes the program (`--post-processor`);
+`minimized_scythe.c` is the first scythe round and `scythe.log` records each round.
