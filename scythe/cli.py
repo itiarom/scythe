@@ -63,11 +63,12 @@ def reduce_program(interesting, file_path, language):
             interesting.mode = list(p.kinds)
             node_filter = (
                 lambda n, p=p: n.node_type in p.kinds
-                and (p.where is None or p.where(n)))
-            if p.driver == "probe":
-                parallel_probe_reduce(interesting, node_filter)
+                and (p.where is None or p.where(n, interesting.graph)))
+            if p.driver in ("probe", "bulk"):
+                parallel_probe_reduce(interesting, node_filter,
+                                      union_first=p.driver == "bulk")
             else:
-                perform_dd(interesting, node_filter, parallel=True)
+                perform_dd(interesting, node_filter)
 
     run_to_fixpoint(file_path, sweep, interesting.deferral)
 
@@ -79,9 +80,8 @@ def main():
     graph = build_graph_from_file(args.source_file, args.language)
     checker = PROPERTY_CHECKERS[args.language](args.source_file, args.script)
     content = utils.read_file(args.source_file)
-    deferral = DeferralTracker() if args.language == "c" else None
-    interesting = Interesting(graph, content, checker, args.language,
-                              LANGUAGES[args.language].mode, deferral)
+    deferral = DeferralTracker() if LANGUAGES[args.language].defer else None
+    interesting = Interesting(graph, content, checker, args.language, deferral)
 
     reduce_program(interesting, args.source_file, args.language)
 
