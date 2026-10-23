@@ -46,7 +46,9 @@ Scythe supports the following command-line arguments:
 - `--language`: Specify the programming language. Options: `solidity`, `java`, or `c`. (Default: `"solidity"`)
 - `--source-file`: The source file to minimize (rewritten in place).
 - `--script`: The property test script (exit 0 iff the property holds).
-- `--post-processor`: Optional. After scythe reaches a fixpoint, run `CMD <source-file> <script>` to reduce the file further in place (e.g., a Perses wrapper). Omitted = scythe behaves exactly as without it.
+- `--post-processor`: Optional. After scythe reaches a fixpoint, run `CMD <source-file> <script>` to reduce the file further in place (e.g., `scripts/perses`), then alternate scythe and `CMD` until neither changes the program.
+- `--max-rounds`: Optional. Maximum number of scythe/post-processor alternations (default: 4).
+- `--scythe-output`: Optional. Also save the program produced by the first scythe round (before any post-processor) to this path.
 
 ### Basic Command
 
