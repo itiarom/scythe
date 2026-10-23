@@ -150,12 +150,14 @@ class DeferralTracker:
                 key, deps = _inner_key_and_deps(n, src, definitions, id_starts,
                                                 id_texts, seen)
                 self._sigs[n] = (key, _deps_sig(deps, symbol_hashes))
-            elif n.name in definitions:
-                deps = _top_level_deps(
-                    n.name, definitions, references, referrers
-                )
+                continue
+            # Parameters, locals and fields ("owner:name") follow their owner.
+            owner = n.name.split(":", 1)[0] if n.name else None
+            if owner in definitions:
+                deps = _top_level_deps(owner, definitions, references,
+                                       referrers)
                 self._sigs[n] = ((n.node_type, n.name),
-                                 (symbol_hashes[n.name],
+                                 (symbol_hashes[owner],
                                   _deps_sig(deps, symbol_hashes)))
 
     def should_probe(self, node):
