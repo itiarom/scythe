@@ -23,7 +23,13 @@ pip install --editable .
 
 ### Docker image setup
 
-To build the project Docker image with the repo tooling and benchmark wrappers already installed:
+A prebuilt project Docker image with the repo tooling and benchmark wrappers already installed is published on Docker Hub as `itiarom/scythe:latest`:
+
+```bash
+docker pull itiarom/scythe:latest
+```
+
+Alternatively, build the image locally:
 
 ```bash
 docker build -t scythe .
@@ -34,7 +40,7 @@ This image exposes the same CLI as the local installation and also includes help
 The container supports the runtime modes for direct reducer execution and benchmark execution. A quick way to inspect the available entry points is to run the container help output, which lists the supported commands and examples.
 
 ```bash
-docker run --rm -it -v "$PWD:/workspace" -w /workspace scythe --help
+docker run --rm -it -v "$PWD:/workspace" -w /workspace itiarom/scythe:latest --help
 ```
 
 **This container can be used to avoid project setup directly.**
@@ -200,7 +206,7 @@ docker run --rm -it \
   -v "$PWD:$PWD" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -w "$PWD" \
-  scythe benchmark -l c -o output
+  itiarom/scythe:latest benchmark -l c -o output
 ```
 
 You will also need to install the [Perses v2.5](https://github.com/uw-pluverse/perses)
@@ -256,18 +262,18 @@ With Docker, the same commands can be run through the project image:
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l solidity -o output
+  itiarom/scythe:latest benchmark -l solidity -o output
 
 docker run --rm -it \
   -v "$PWD:$PWD" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -w "$PWD" \
-  scythe benchmark -l c -o output
+  itiarom/scythe:latest benchmark -l c -o output
 
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l java -o output
+  itiarom/scythe:latest benchmark -l java -o output
 ```
 
 For C benchmarks, the mounted socket is required and the benchmark runner will refuse to start if the required compiler images are not already present.
@@ -292,18 +298,18 @@ With Docker:
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l solidity -b smart2 -o output
+  itiarom/scythe:latest benchmark -l solidity -b smart2 -o output
 
 docker run --rm -it \
   -v "$PWD:$PWD" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -w "$PWD" \
-  scythe benchmark -l c -b clang-23309 -o output
+  itiarom/scythe:latest benchmark -l c -b clang-23309 -o output
 
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l java -b jdk-iter_21 -o output
+  itiarom/scythe:latest benchmark -l java -b jdk-iter_21 -o output
 ```
 
 ### Running with Specific Reduction Methods
@@ -322,12 +328,12 @@ With Docker:
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l solidity --only-perses -o output
+  itiarom/scythe:latest benchmark -l solidity --only-perses -o output
 
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l solidity --only-scythe -o output
+  itiarom/scythe:latest benchmark -l solidity --only-scythe -o output
 ```
 
 ### Benchmark Output
