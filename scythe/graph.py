@@ -3,9 +3,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import networkx as nx
 
-from scythe import parsers
-
-EXPRESSION_MIN_BYTES = 40
+from scythe import parsers, utils
 
 
 class DeclarationNode(NamedTuple):
@@ -51,8 +49,6 @@ class NodeSpec:
 class LanguageSchema:
     language: str
     specs: Dict[str, NodeSpec] = field(default_factory=dict)
-    custom: Dict[str, Callable] = field(default_factory=dict)
-    custom_exit: Dict[str, Callable] = field(default_factory=dict)
     type_nodes: tuple = ()
 
 
@@ -63,7 +59,6 @@ class GraphBuilder(parsers.TreeTraversal):
         self.graph = nx.DiGraph()
         self.declaration_stack: List[DeclarationNode] = []
         self.registry: Dict[str, Dict[str, DeclarationNode]] = {}
-        self.current_function: Optional[DeclarationNode] = None
         self._scope_nodes: List[int] = []
         self._pending_type_uses: list = []
 
@@ -90,19 +85,11 @@ class GraphBuilder(parsers.TreeTraversal):
         return self._exit
 
     def _visit(self, node) -> None:
-        custom = self.SCHEMA.custom.get(node.type)
-        if custom is not None:
-            custom(self, node)
-            return
         spec = self.SCHEMA.specs.get(node.type)
         if spec is not None:
             self._emit_spec(node, spec)
 
     def _exit(self, node) -> None:
-        custom = self.SCHEMA.custom_exit.get(node.type)
-        if custom is not None:
-            custom(self, node)
-            return
         if self._scope_nodes and self._scope_nodes[-1] == node.id:
             self._scope_nodes.pop()
             self.pop_declaration()
@@ -228,195 +215,6 @@ JAVA = LanguageSchema(
 )
 
 
-_C_EXPR_VALUE_TYPES = ("binary_expression", "call_expression",
-                       "conditional_expression", "parenthesized_expression")
-
-
-def _c_add_function(builder, ident):
-    name = ident.text.decode("utf-8")
-    parent = builder.peek_declaration()
-    func = DeclarationNode(name, "function", parent)
-    builder.graph.add_node(func)
-    builder.push_declaration(func)
-    builder.symbols[name] = func
-    builder.current_function = func
-    if parent is not None:
-        builder.graph.add_edge(parent, func, label="def")
-
-
-def _c_function_definition(builder, node):
-    for child in node.children:
-        if child.type != "function_declarator":
-            continue
-        for cc in child.children:
-            if cc.type == "identifier":
-                _c_add_function(builder, cc)
-                break
-            if cc.type == "parenthesized_declarator":
-                for ccc in cc.children:
-                    if ccc.type == "identifier":
-                        _c_add_function(builder, ccc)
-                        break
-
-
-def _c_exit_function_definition(builder, node):
-    builder.pop_declaration()
-    builder.current_function = None
-
-
-def _c_add_global(builder, name):
-    parent = builder.current_function or builder.peek_declaration()
-    var = DeclarationNode(name, "global_variable", parent)
-    builder.graph.add_node(var)
-    builder.symbols[name] = var
-    builder.push_declaration(var)
-    if parent is not None:
-        builder.graph.add_edge(parent, var, label="var")
-
-
-def _c_declaration(builder, node):
-    if not any(c.type == "storage_class_specifier"
-               and c.text.decode("utf-8") == "static" for c in node.children):
-        return
-    if any(c.type == "function_declarator" for c in node.children):
-        return
-    for child in node.children:
-        if child.type == "identifier":
-            _c_add_global(builder, child.text.decode("utf-8"))
-        elif child.type in ("init_declarator", "array_declarator"):
-            for cc in child.children:
-                if cc.type == "identifier":
-                    _c_add_global(builder, cc.text.decode("utf-8"))
-
-
-def _c_add_block(builder, node):
-    in_block = node.parent is not None and node.parent.type in (
-        "compound_statement", "translation_unit", "declaration_list")
-    name = f"{node.type}@{node.start_byte}:{node.end_byte}"
-    block = DeclarationNode(name, node.type, builder.current_function,
-                            (node.start_byte, node.end_byte, in_block))
-    builder.graph.add_node(block)
-    if builder.current_function is not None:
-        builder.graph.add_edge(builder.current_function, block, label="block")
-
-
-def _c_initializer_list(builder, node):
-    if node.parent is not None and node.parent.type == "initializer_list":
-        return
-    name = f"init@{node.start_byte}:{node.end_byte}"
-    init = DeclarationNode(name, "initializer", builder.current_function,
-                           (node.start_byte, node.end_byte))
-    builder.graph.add_node(init)
-    if builder.current_function is not None:
-        builder.graph.add_edge(builder.current_function, init, label="init")
-
-
-def _c_add_expression(builder, node):
-    if node is None or node.type not in _C_EXPR_VALUE_TYPES:
-        return
-    if node.end_byte - node.start_byte < EXPRESSION_MIN_BYTES:
-        return
-    name = f"expr@{node.start_byte}:{node.end_byte}"
-    expr = DeclarationNode(name, "expression", builder.current_function,
-                           (node.start_byte, node.end_byte))
-    builder.graph.add_node(expr)
-    if builder.current_function is not None:
-        builder.graph.add_edge(builder.current_function, expr, label="expr")
-
-
-def _c_assignment_expression(builder, node):
-    if any(c.type == "=" for c in node.children):
-        _c_add_expression(builder, node.child_by_field_name("right"))
-
-
-def _c_init_declarator(builder, node):
-    _c_add_expression(builder, node.child_by_field_name("value"))
-
-
-def _c_return_statement(builder, node):
-    for c in node.children:
-        if c.type not in ("return", ";", "comment"):
-            _c_add_expression(builder, c)
-            return
-
-
-def _c_call_expression(builder, node):
-    args = node.child_by_field_name("arguments")
-    if args is None:
-        return
-    for a in args.children:
-        _c_add_expression(builder, a)
-
-
-def _c_struct_declaration_name(parent_node):
-    for child in parent_node.children:
-        if child.type == "identifier":
-            return child.text.decode("utf-8")
-        if child.type in ("init_declarator", "pointer_declarator", "array_declarator"):
-            for cc in child.children:
-                if cc.type == "identifier":
-                    return cc.text.decode("utf-8")
-
-
-def _c_struct_parameter_name(parent_node):
-    function_declarator = parent_node.parent.parent
-    for child in function_declarator.children:
-        if child.type == "identifier":
-            return child.text.decode("utf-8")
-
-
-def _c_struct_function_name(parent_node):
-    for child in parent_node.children:
-        if child.type == "function_declarator":
-            for cc in child.children:
-                if cc.type == "identifier":
-                    return cc.text.decode("utf-8")
-
-
-def _c_struct_specifier(builder, node):
-    parent_node = node.parent if len(node.children) < 3 else None
-    for child in node.children:
-        if child.type != "type_identifier":
-            continue
-        struct_name = child.text.decode("utf-8")
-        struct_node = DeclarationNode(struct_name, "struct", None)
-        if struct_name not in builder.structs:
-            builder.structs[struct_name] = struct_node
-            return builder.graph.add_node(struct_node)
-        if parent_node is not None:
-            name = None
-            if parent_node.type == "declaration":
-                name = _c_struct_declaration_name(parent_node)
-            elif parent_node.type == "parameter_declaration":
-                name = _c_struct_parameter_name(parent_node)
-            elif parent_node.type == "function_definition":
-                name = _c_struct_function_name(parent_node)
-            if name and builder.symbols.get(name) is not None:
-                builder.graph.add_edge(struct_node, builder.symbols[name],
-                                       label="struct")
-        return
-
-
-C_SCHEMA = LanguageSchema(
-    language="c",
-    custom={
-        "function_definition": _c_function_definition,
-        "declaration": _c_declaration,
-        "struct_specifier": _c_struct_specifier,
-        "for_statement": _c_add_block,
-        "if_statement": _c_add_block,
-        "initializer_list": _c_initializer_list,
-        "assignment_expression": _c_assignment_expression,
-        "init_declarator": _c_init_declarator,
-        "return_statement": _c_return_statement,
-        "call_expression": _c_call_expression,
-    },
-    custom_exit={
-        "function_definition": _c_exit_function_definition,
-    },
-)
-
-
 class SolidityGraphBuilder(GraphBuilder):
     SCHEMA = SOLIDITY
 
@@ -425,13 +223,11 @@ class JavaGraphBuilder(GraphBuilder):
     SCHEMA = JAVA
 
 
-class CGraphBuilder(GraphBuilder):
-    SCHEMA = C_SCHEMA
+class CGraphBuilder:
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.symbols: Dict[str, DeclarationNode] = {}
-        self.structs: Dict[str, DeclarationNode] = {}
+    def build_graph(self, source_file: str) -> nx.DiGraph:
+        from scythe.cdeps import CModel
+        return CModel(utils.read_file(source_file)).graph()
 
 
 GRAPH_BUILDERS = {
@@ -441,7 +237,7 @@ GRAPH_BUILDERS = {
 }
 
 
-def get_graph_builder(language: str) -> type[GraphBuilder]:
+def get_graph_builder(language: str):
     builder = GRAPH_BUILDERS.get(language)
     if builder is None:
         raise Exception(

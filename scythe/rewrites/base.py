@@ -6,12 +6,6 @@ import networkx as nx
 from scythe import parsers
 
 
-def remove_empty_lines(source_code):
-    lines = source_code.split("\n")
-    non_empty_lines = [line for line in lines if line.strip() != ""]
-    return "\n".join(non_empty_lines)
-
-
 class ASTRemoval(parsers.TreeTraversal):
     def __init__(self, content: str, graph: nx.DiGraph) -> None:
         self.content = content

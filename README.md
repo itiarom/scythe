@@ -23,7 +23,13 @@ pip install --editable .
 
 ### Docker image setup
 
-To build the project Docker image with the repo tooling and benchmark wrappers already installed:
+A prebuilt project Docker image with the repo tooling and benchmark wrappers already installed is published on Docker Hub as `itiarom/scythe:latest`:
+
+```bash
+docker pull itiarom/scythe:latest
+```
+
+Alternatively, build the image locally:
 
 ```bash
 docker build -t scythe .
@@ -34,7 +40,7 @@ This image exposes the same CLI as the local installation and also includes help
 The container supports the runtime modes for direct reducer execution and benchmark execution. A quick way to inspect the available entry points is to run the container help output, which lists the supported commands and examples.
 
 ```bash
-docker run --rm -it -v "$PWD:/workspace" -w /workspace scythe --help
+docker run --rm -it -v "$PWD:/workspace" -w /workspace itiarom/scythe:latest --help
 ```
 
 **This container can be used to avoid project setup directly.**
@@ -46,7 +52,9 @@ Scythe supports the following command-line arguments:
 - `--language`: Specify the programming language. Options: `solidity`, `java`, or `c`. (Default: `"solidity"`)
 - `--source-file`: The source file to minimize (rewritten in place).
 - `--script`: The property test script (exit 0 iff the property holds).
-- `--post-processor`: Optional. After scythe reaches a fixpoint, run `CMD <source-file> <script>` to reduce the file further in place (e.g., a Perses wrapper). Omitted = scythe behaves exactly as without it.
+- `--post-processor`: Optional. After scythe reaches a fixpoint, run `CMD <source-file> <script>` to reduce the file further in place (e.g., `scripts/perses`), then alternate scythe and `CMD` until neither changes the program.
+- `--max-rounds`: Optional. Maximum number of scythe/post-processor alternations (default: 4).
+- `--scythe-output`: Optional. Also save the program produced by the first scythe round (before any post-processor) to this path.
 
 ### Basic Command
 
@@ -198,7 +206,7 @@ docker run --rm -it \
   -v "$PWD:$PWD" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -w "$PWD" \
-  scythe benchmark -l c -o output
+  itiarom/scythe:latest benchmark -l c -o output
 ```
 
 You will also need to install the [Perses v2.5](https://github.com/uw-pluverse/perses)
@@ -254,18 +262,18 @@ With Docker, the same commands can be run through the project image:
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l solidity -o output
+  itiarom/scythe:latest benchmark -l solidity -o output
 
 docker run --rm -it \
   -v "$PWD:$PWD" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -w "$PWD" \
-  scythe benchmark -l c -o output
+  itiarom/scythe:latest benchmark -l c -o output
 
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l java -o output
+  itiarom/scythe:latest benchmark -l java -o output
 ```
 
 For C benchmarks, the mounted socket is required and the benchmark runner will refuse to start if the required compiler images are not already present.
@@ -273,6 +281,7 @@ For C benchmarks, the mounted socket is required and the benchmark runner will r
 Perses runs with `-XX:MaxRAMPercentage=75` by default. Large inputs (e.g. `clang-27137`) run
 out of heap with the JVM default; override the JVM options with `PERSES_JAVA_OPTS`, e.g.
 `PERSES_JAVA_OPTS=-Xmx14g ./scripts/run-benchmarks.sh ...` or `docker run -e PERSES_JAVA_OPTS=-Xmx14g ...`.
+Perses options are taken from `PERSES_FLAGS` (default: `--enable-latra false --enable-trec false`).
 
 ### Running Specific Benchmarks
 
@@ -289,18 +298,18 @@ With Docker:
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l solidity -b smart2 -o output
+  itiarom/scythe:latest benchmark -l solidity -b smart2 -o output
 
 docker run --rm -it \
   -v "$PWD:$PWD" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -w "$PWD" \
-  scythe benchmark -l c -b clang-23309 -o output
+  itiarom/scythe:latest benchmark -l c -b clang-23309 -o output
 
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l java -b jdk-iter_21 -o output
+  itiarom/scythe:latest benchmark -l java -b jdk-iter_21 -o output
 ```
 
 ### Running with Specific Reduction Methods
@@ -319,12 +328,12 @@ With Docker:
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l solidity --only-perses -o output
+  itiarom/scythe:latest benchmark -l solidity --only-perses -o output
 
 docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
-  scythe benchmark -l solidity --only-scythe -o output
+  itiarom/scythe:latest benchmark -l solidity --only-scythe -o output
 ```
 
 ### Benchmark Output
@@ -340,4 +349,6 @@ output/<name>/time                            # one "method=seconds" line per me
 
 The workflow runs scythe on the original, then Perses on scythe's result
 (`scythe+perses`), and separately Perses on the original (`perses` baseline). The
-`scythe_perses` time is the sum of the scythe and Perses passes.
+`scythe_perses` time is the sum of the scythe and Perses passes. For C, scythe and
+Perses alternate until neither changes the program (`--post-processor`);
+`minimized_scythe.c` is the first scythe round and `scythe.log` records each round.

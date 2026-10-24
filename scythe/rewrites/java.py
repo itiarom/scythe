@@ -1,7 +1,8 @@
 import re
 
 from scythe import parsers
-from scythe.rewrites.base import ASTRemoval, remove_empty_lines
+from scythe.rewrites.base import ASTRemoval
+from scythe.utils import remove_empty_lines
 
 
 class JavaDeclarationRemoval(ASTRemoval):

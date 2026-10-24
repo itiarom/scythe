@@ -5,7 +5,9 @@
 # counts / performance.
 #
 #   scythe         : scythe on the original program
-#   scythe+perses  : Perses on the program produced by scythe
+#   scythe+perses  : Perses on the program produced by scythe (C: scythe and
+#                    Perses alternate until neither changes the program; the
+#                    scythe time is that of the first scythe round)
 #   perses          : baseline -- Perses on the original program
 #
 # For each benchmark <name> the following files are written under the output dir
@@ -48,6 +50,9 @@
 #     -h, --help            Show this help
 #
 # Environment:
+#   SCYTHE             scythe executable (default: the repo .venv, else scythe on PATH).
+#   PERSES_FLAGS       Perses options (default: --enable-latra false --enable-trec false).
+#   SCYTHE_WORK_ROOT   Where C work dirs are created (default: the current directory).
 #   PERSES_JAVA_OPTS   JVM options for Perses (default: -XX:MaxRAMPercentage=75).
 #                      Large inputs (e.g. C/clang-27137) exhaust the JVM's default
 #                      heap (1/4 of RAM) while parsing; raise it with e.g. -Xmx14g.
@@ -57,7 +62,10 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PERSES_JAR="$ROOT_DIR/perses_deploy.jar"
 read -r -a PERSES_JVM_ARGS <<< "${PERSES_JAVA_OPTS:--XX:MaxRAMPercentage=75}"
+export PERSES_FLAGS="${PERSES_FLAGS:---enable-latra false --enable-trec false}"
+read -r -a PERSES_FLAG_ARGS <<< "$PERSES_FLAGS"
 DELETE_COMMENTS="$ROOT_DIR/delete_comments.py"
+WORK_ROOT="${SCYTHE_WORK_ROOT:-$PWD}"
 
 LANGUAGE="solidity"
 OUTPUT_DIR="output"
@@ -95,11 +103,14 @@ case "$LANGUAGE" in
     *) echo "Error: --language must be 'solidity', 'java', or 'c' (got '$LANGUAGE')." >&2; exit 1 ;;
 esac
 
-if [[ -x "$ROOT_DIR/.venv/bin/scythe" ]]; then
-    SCYTHE="$ROOT_DIR/.venv/bin/scythe"
-else
-    SCYTHE="scythe"
+if [[ -z "${SCYTHE:-}" ]]; then
+    if [[ -x "$ROOT_DIR/../.venv/bin/scythe" ]]; then
+        SCYTHE="$(cd "$ROOT_DIR/.." && pwd)/.venv/bin/scythe"
+    else
+        SCYTHE="scythe"
+    fi
 fi
+echo "Using scythe: $(command -v "$SCYTHE")"
 
 [[ -f "$PERSES_JAR" ]] || { echo "Error: $PERSES_JAR not found." >&2; exit 1; }
 if [[ "$LANGUAGE" == "solidity" ]]; then
@@ -133,7 +144,6 @@ ensure_c_compiler_images() {
         return 0
     fi
 
-    # de-duplicate while preserving order
     local dedup=()
     local seen=()
     for image in "${images[@]}"; do
@@ -161,11 +171,6 @@ ensure_c_compiler_images() {
     return 0
 }
 
-# =============================================================================
-# Solidity compiler (solc) provisioning
-# =============================================================================
-
-# True if solc-select already has the given version installed.
 solc_installed() {
     solc-select versions 2>/dev/null | sed 's/[[:space:]].*//' | grep -Fxq "$1"
 }
@@ -283,19 +288,6 @@ run_scythe() {
             "$SCYTHE" --source-file "$src" --script "$test" \
                        --language java ) >/dev/null 2>&1
         rm -rf "$work"
-    elif [[ "$LANGUAGE" == "c" ]]; then
-        # The C oracles assume the candidate sits in $(pwd) (they bind-mount it
-        # into the buggy-compiler container). Reduce a copy named program.c in a
-        # workspace-mounted throwaway cwd so nested Docker can access it and the
-        # oracle's byproducts never litter the repo. scythe runs each candidate's
-        # oracle in a tempfile.mkdtemp() dir, so point TMPDIR there too: the
-        # container's /tmp is invisible to the host daemon's nested bind mounts.
-        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
-        cp "$src" "$work/program.c"
-        ( cd "$work" && TMPDIR="$work" "$SCYTHE" --source-file program.c --script "$test" \
-                       --language c ) >/dev/null 2>&1
-        cp "$work/program.c" "$src"
-        rm -rf "$work"
     else
         "$SCYTHE" --source-file "$src" --script "$test" >/dev/null 2>&1
     fi
@@ -303,11 +295,29 @@ run_scythe() {
     echo $((end - start))
 }
 
+run_scythe_joint() {
+    local input="$1" out="$2" test="$3" timefile="$4" start end work s_time
+    work="$(mktemp -d "$WORK_ROOT/.scythe-work.XXXXXX")"
+    cp "$input" "$work/program.c"
+    start=$(date +%s)
+    ( cd "$work" && TMPDIR="$work" "$SCYTHE" --source-file program.c --script "$test" \
+                   --language c --post-processor "$ROOT_DIR/perses" \
+                   --scythe-output "$out/minimized_scythe.c" ) >"$work/scythe.log" 2>&1
+    end=$(date +%s)
+    s_time="$(sed -n 's/^\[round 0\] scythe \([0-9]*\)s.*/\1/p' "$work/scythe.log")"
+    cp "$work/program.c" "$out/minimized_scythe_perses.c"
+    cp "$work/scythe.log" "$out/scythe.log"
+    rm -rf "$work"
+    echo "scythe=${s_time:-0}" >> "$timefile"
+    echo "scythe_perses=$((end - start))" >> "$timefile"
+    echo "  [scythe] ${s_time:-?}s, [scythe+perses] $((end - start))s"
+}
+
 run_perses() {
     local input="$1" output="$2" test_script="$3" version="$4"
     local work persesout staged perses_log start end perses_status=0
     if [[ "$LANGUAGE" == "c" ]]; then
-        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
+        work="$(mktemp -d "$WORK_ROOT/.scythe-work.XXXXXX")"
     else
         work="$(mktemp -d)"
     fi
@@ -320,17 +330,20 @@ run_perses() {
     start=$(date +%s)
     if [[ "$LANGUAGE" == "java" ]]; then
         PATH="$BENCH_JDK_BIN:$PATH" REFERENCE_JAVAC="$REFERENCE_JAVAC" "$PERSES_JAVA" "${PERSES_JVM_ARGS[@]}" -jar "$PERSES_JAR" \
+            "${PERSES_FLAG_ARGS[@]}" \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
             --output-dir "$persesout" >"$perses_log" 2>&1 || perses_status=$?
     elif [[ "$LANGUAGE" == "c" ]]; then
         ( cd "$work" && java "${PERSES_JVM_ARGS[@]}" -jar "$PERSES_JAR" \
+            "${PERSES_FLAG_ARGS[@]}" \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
             --output-dir "$persesout" ) >"$perses_log" 2>&1 || perses_status=$?
     else
         [[ "$LANGUAGE" == "solidity" ]] && solc-select use "$version" >/dev/null 2>&1
         java "${PERSES_JVM_ARGS[@]}" -jar "$PERSES_JAR" \
+            "${PERSES_FLAG_ARGS[@]}" \
             --test-script "$work/test.sh" \
             --input-file "$staged" \
             --output-dir "$persesout" >"$perses_log" 2>&1 || perses_status=$?
@@ -376,10 +389,7 @@ oracle_holds() {
         rc=$?
         rm -rf "$work"
     elif [[ "$LANGUAGE" == "c" ]]; then
-        # Mirror the C oracle's "candidate lives in $(pwd)" contract: stage it as
-        # program.c in a daemon-visible throwaway cwd and invoke the test with no
-        # argument. The workspace must be mounted at the same absolute path.
-        work="$(mktemp -d "$PWD/.scythe-work.XXXXXX")"
+        work="$(mktemp -d "$WORK_ROOT/.scythe-work.XXXXXX")"
         log="$work/oracle.log"
         cp "$candidate" "$work/program.c"
         ( cd "$work" && bash "$test" ) >"$log" 2>&1
@@ -422,8 +432,6 @@ run_benchmark() {
         return
     fi
 
-    # Stage a single shared input so every method starts from the same program.
-    # Solidity strips comments once; Java is staged verbatim.
     local staged
     if [[ "$LANGUAGE" == "c" ]]; then
         staged="$(mktemp "$PWD/.scythe-stage.XXXXXX.$EXT")"
@@ -450,7 +458,10 @@ run_benchmark() {
     local timefile="$out/time"; : > "$timefile"
 
     local scythe_time=0
-    if ! $ONLY_PERSES; then
+    if ! $ONLY_PERSES && [[ "$LANGUAGE" == "c" ]]; then
+        echo "  [scythe+perses] scythe and Perses alternating to a joint fixpoint..."
+        run_scythe_joint "$staged" "$(cd "$out" && pwd)" "$abs_test" "$timefile"
+    elif ! $ONLY_PERSES; then
         local g_out="$out/minimized_scythe.$EXT"
         cp "$staged" "$g_out"
         echo "  [scythe] reducing..."
