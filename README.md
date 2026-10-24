@@ -1,5 +1,7 @@
 # Scythe
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23589196.svg)](https://doi.org/10.5281/zenodo.23589196)
+
 Scythe is a semantic-aware program reducer that automatically minimizes source code while preserving specified properties. Using delta-debugging and language-specific reduction passes, it simplifies code for easier debugging and analysis across Solidity, C, and Java.
 
 ## Installation/Setup
